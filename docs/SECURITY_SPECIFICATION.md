@@ -197,6 +197,32 @@ let ciphertext = cipher.encrypt(
    - Active Double Ratchet sessions are restored into memory and persisted.
    - Non-expired chat messages are restored; expired messages are discarded.
 
+---
+
+### 5.7 Server-Side Opaque Backup Storage (`POST /v1/backup`)
+
+#### Endpoint Specification:
+- **Route**: `POST /v1/backup`
+- **Body**: Complete raw backup file bytes (`[42-byte header || N-byte ciphertext]`).
+- **Authentication**: Blinded token or SHA-256 hash of the client's identity public key passed in `X-User-Id` or `Authorization: Bearer <token>`. **Zero** personal metadata (no email, no phone number, no IP tracking).
+
+#### Server-Side Invariants:
+1. **Zero Knowledge / Opaque Blob**:
+   - The server **MUST NOT** inspect, parse, or log the backup contents.
+   - The server stores the raw bytes as an opaque binary blob in `backups(user_id, blob, created_at, size_bytes)`.
+2. **Replacement Policy**:
+   - Replaces previous backups for the same user, keeping strictly the latest backup unless versioning is explicitly opted into.
+3. **Storage Abuse Protection**:
+   - Enforces a maximum blob size ceiling of **100 MB** (`104,857,600` bytes). Requests exceeding 100 MB are rejected with `HTTP 413 Payload Too Large`.
+   - Blobs shorter than 42 bytes (the minimum container header size) are rejected with `HTTP 400 Bad Request`.
+
+#### Client-Side Confirmation Invariant:
+After a successful upload, the client interface **MUST** display:
+> *"Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."*
+
+**Critical UX Rule**: The client must **not** render a success checkmark (e.g. `✓` or `✔`) that implies the server can assist with recovery or password reset. The user must understand that zero-knowledge backup recovery is solely dependent on their passphrase.
+
+
 
 
 

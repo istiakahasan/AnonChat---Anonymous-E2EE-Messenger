@@ -376,5 +376,44 @@ impl AnonChatEngine {
 
         Ok(backup_data)
     }
+
+    /// Uploads the encrypted backup container to the blind relay server as an opaque blob.
+    ///
+    /// Server Requirements:
+    /// - Server identifies the user by the hash of their identity public key (user_id).
+    /// - Server does not inspect, parse, or log the backup contents.
+    /// - Replaces previous backups (keeps only latest).
+    ///
+    /// Client-Side Confirmation:
+    /// Displays: "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+    /// (No success checkmark that implies the server can assist with recovery).
+    pub async fn upload_backup_to_server(&self, passphrase: &str) -> Result<String> {
+        let backup_bytes = self.export_backup(passphrase).await?;
+        let user_id = {
+            let id = self.identity.read().await;
+            id.user_id()
+        };
+
+        self.api_client.upload_backup(&user_id, &backup_bytes).await?;
+
+        Ok(
+            "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+                .to_string(),
+        )
+    }
+
+    /// Fetches the opaque backup blob from the server and restores complete client state.
+    pub async fn restore_backup_from_server(
+        &self,
+        passphrase: &str,
+    ) -> Result<crate::storage::BackupData> {
+        let user_id = {
+            let id = self.identity.read().await;
+            id.user_id()
+        };
+
+        let backup_bytes = self.api_client.fetch_backup(&user_id).await?;
+        self.restore_backup(&backup_bytes, passphrase).await
+    }
 }
 

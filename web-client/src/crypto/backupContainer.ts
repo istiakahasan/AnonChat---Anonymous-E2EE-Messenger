@@ -406,3 +406,36 @@ export async function decryptPayloadAesGcm(
   }
 }
 
+/**
+ * Client-Side Confirmation Invariant:
+ * Displayed after upload without a success checkmark that implies the server can assist with recovery.
+ */
+export const BACKUP_UPLOAD_CONFIRMATION =
+  "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it.";
+
+/**
+ * Uploads the encrypted backup container to the blind relay server as an opaque blob.
+ * Server identifies the user by the hash of their identity public key (X-User-Id).
+ */
+export async function uploadBackupToServer(
+  serverUrl: string,
+  userId: string,
+  containerBytes: Uint8Array
+): Promise<string> {
+  const url = `${serverUrl.replace(/\/+$/, '')}/v1/backup`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'X-User-Id': userId,
+      'Content-Type': 'application/octet-stream',
+    },
+    body: containerBytes,
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to upload backup to server: ${res.status} ${res.statusText}`);
+  }
+
+  return BACKUP_UPLOAD_CONFIRMATION;
+}
+

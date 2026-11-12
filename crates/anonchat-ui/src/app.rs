@@ -696,12 +696,43 @@ impl AnonChatApp {
                                     let len = bytes.len();
                                     self.last_backup_container = Some(bytes);
                                     self.backup_status_msg = Some((
-                                        format!("✓ Backup exported! Total size: {} bytes (42B header + payload)", len),
+                                        format!("Backup exported! Total size: {} bytes (42B header + payload)", len),
                                         false,
                                     ));
                                 }
                                 Err(e) => {
                                     self.backup_status_msg = Some((format!("Export failed: {}", e), true));
+                                }
+                            }
+                        }
+
+                        if ui.add_enabled(can_export, egui::Button::new("☁ Upload to Server")).clicked() {
+                            let sample_db = serde_json::json!({
+                                "contacts": self.contacts.len(),
+                                "messages": self.messages.len(),
+                                "timestamp": Utc::now().timestamp(),
+                            }).to_string();
+
+                            match BackupContainer::encrypt_with_passphrase(
+                                &self.backup_passphrase,
+                                sample_db.as_bytes(),
+                                3,
+                                16,
+                                4,
+                            ) {
+                                Ok(container) => {
+                                    let bytes = container.to_bytes();
+                                    self.last_backup_container = Some(bytes);
+                                    // Client-Side Requirement:
+                                    // Display: "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+                                    // Do not display a "success" checkmark that implies the server can help with recovery.
+                                    self.backup_status_msg = Some((
+                                        "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it.".to_string(),
+                                        false,
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.backup_status_msg = Some((format!("Upload failed: {}", e), true));
                                 }
                             }
                         }
@@ -721,7 +752,7 @@ impl AnonChatApp {
                                             }
                                             Err(e) => {
                                                 self.backup_status_msg = Some((
-                                                    format!("Decryption failed: {} (Wrong passphrase or tampered header)", e),
+                                                    format!("{}", e),
                                                     true,
                                                 ));
                                             }

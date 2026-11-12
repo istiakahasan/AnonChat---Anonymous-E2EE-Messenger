@@ -44,6 +44,10 @@ object BackupContainer {
     const val MAX_ALLOWED_TIME_COST: Byte = 10
     const val MAX_ALLOWED_PARALLELISM: Byte = 4
 
+    // Client-Side Confirmation Invariant (no success checkmark)
+    const val BACKUP_UPLOAD_CONFIRMATION =
+        "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+
     data class Header(
         val magic: ByteArray,
         val version: Byte,

@@ -11,6 +11,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{get, post},
     Router,
@@ -22,7 +23,10 @@ mod routes;
 mod storage;
 
 use crate::middleware::zero_logging_middleware;
-use crate::routes::{drain_queue, enqueue_blob, get_keys, upload_keys, AppState};
+use crate::routes::{
+    drain_queue, enqueue_blob, get_backup, get_keys, upload_backup, upload_keys, AppState,
+    MAX_BACKUP_BLOB_SIZE,
+};
 use crate::storage::{MemoryRelayStorage, PostgresRelayStorage, RelayStorage};
 
 #[tokio::main]
@@ -50,12 +54,15 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState { storage };
 
-    // Build API router with zero-logging middleware
+    // Build API router with zero-logging middleware and 100 MB body limit
     let app = Router::new()
         .route("/v1/keys", post(upload_keys))
         .route("/v1/keys/:userId", get(get_keys))
         .route("/v1/queue", post(enqueue_blob))
         .route("/v1/queue/:userId", get(drain_queue))
+        .route("/v1/backup", post(upload_backup))
+        .route("/v1/backup/:userId", get(get_backup))
+        .layer(DefaultBodyLimit::max(MAX_BACKUP_BLOB_SIZE))
         .layer(middleware::from_fn(zero_logging_middleware))
         .with_state(state);
 

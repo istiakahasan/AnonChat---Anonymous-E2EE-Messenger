@@ -33,6 +33,10 @@ public struct BackupContainer {
     public static let maxAllowedTimeCost: UInt8 = 10
     public static let maxAllowedParallelism: UInt8 = 4
 
+    // Client-Side Confirmation Invariant (no success checkmark)
+    public static let backupUploadConfirmation: String =
+        "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+
     public struct Header: Equatable {
         public let magic: [UInt8]
         public let version: UInt8

@@ -200,3 +200,131 @@ pub async fn drain_queue(
     Ok((StatusCode::OK, Json(QueueResponse { messages: message_items })))
 }
 
+/// Maximum allowed backup blob size: 100 MB (104,857,600 bytes)
+pub const MAX_BACKUP_BLOB_SIZE: usize = 100 * 1024 * 1024;
+
+/// Minimum container size (42-byte header)
+pub const MIN_BACKUP_BLOB_SIZE: usize = 42;
+
+/// POST /v1/backup: Uploads the encrypted backup as an opaque blob.
+///
+/// Server-Side Requirements:
+/// - The server MUST NOT inspect, parse, or log the backup contents.
+/// - Authenticated by blinded token or hash of user's identity public key (X-User-Id or Bearer).
+/// - Enforces maximum blob size (100 MB).
+/// - Replaces previous backups for the same user (keeps only the latest).
+pub async fn upload_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Authentication: identify user by blinded token or hash of their identity public key
+    let user_id = headers
+        .get("X-User-Id")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        })
+        .map(|s| s.trim().to_string());
+
+    let user_id = match user_id {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Authentication required: missing X-User-Id or Bearer token (hash of identity public key)".into(),
+                }),
+            ));
+        }
+    };
+
+    // Enforce maximum blob size: 100 MB
+    if body.len() > MAX_BACKUP_BLOB_SIZE {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: format!(
+                    "Payload too large: {} bytes exceeds 100 MB limit ({})",
+                    body.len(),
+                    MAX_BACKUP_BLOB_SIZE
+                ),
+            }),
+        ));
+    }
+
+    if body.len() < MIN_BACKUP_BLOB_SIZE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Backup file too short: {} bytes (expected at least {} bytes)",
+                    body.len(),
+                    MIN_BACKUP_BLOB_SIZE
+                ),
+            }),
+        ));
+    }
+
+    // Server-Side Invariant: Store opaque blob without inspecting, parsing, or logging contents
+    state
+        .storage
+        .save_backup(&user_id, body.to_vec())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to store backup blob: {}", e),
+                }),
+            )
+        })?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "backup_uploaded",
+            "size_bytes": body.len()
+        })),
+    ))
+}
+
+/// GET /v1/backup/:userId: Retrieves the latest opaque backup blob for a user.
+pub async fn get_backup(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let backup_opt = state.storage.get_backup(&user_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Database error: {}", e),
+            }),
+        )
+    })?;
+
+    match backup_opt {
+        Some(backup) => {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".parse().unwrap(),
+            );
+            headers.insert(
+                "X-Backup-Size",
+                backup.size_bytes.to_string().parse().unwrap(),
+            );
+            Ok((StatusCode::OK, headers, backup.blob))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "No backup found for this user".into(),
+            }),
+        )),
+    }
+}
+

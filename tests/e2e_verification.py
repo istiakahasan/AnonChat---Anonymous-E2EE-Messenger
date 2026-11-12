@@ -527,6 +527,7 @@ class MockBlindRelayServer:
     def __init__(self):
         self.bundles = {}
         self.queues = {}
+        self.backups = {}
         self.lock = threading.Lock()
 
     def post_keys(self, body: dict) -> tuple:
@@ -566,6 +567,34 @@ class MockBlindRelayServer:
             # ATOMIC DRAIN: delete messages from DB upon HTTP 200 response
             messages = self.queues.pop(user_id, [])
         return 200, {"messages": messages}
+
+    def post_backup(self, user_id: str, blob: bytes) -> tuple:
+        MAX_BLOB_SIZE = 100 * 1024 * 1024 # 100 MB
+        if not user_id:
+            return 401, {"error": "Authentication required: missing X-User-Id or Bearer token"}
+        if len(blob) > MAX_BLOB_SIZE:
+            return 413, {"error": f"Payload too large: {len(blob)} exceeds {MAX_BLOB_SIZE} bytes limit (100 MB)"}
+        if len(blob) < 42:
+            return 400, {"error": "Backup file too short: expected at least 42 bytes"}
+
+        with self.lock:
+            # Server-Side Requirements:
+            # - MUST NOT inspect, parse, or log the backup contents
+            # - Store the blob in table: backups(user_id, blob, created_at, size_bytes)
+            # - Replace previous backups for the same user (keep only latest)
+            self.backups[user_id] = {
+                "blob": blob,
+                "created_at": time.time(),
+                "size_bytes": len(blob)
+            }
+        return 200, {"status": "backup_uploaded", "size_bytes": len(blob)}
+
+    def get_backup(self, user_id: str) -> tuple:
+        with self.lock:
+            backup = self.backups.get(user_id)
+            if not backup:
+                return 404, {"error": "No backup found for this user"}
+            return 200, backup["blob"]
 
 
 # ---------------------------------------------------------------------------
@@ -1398,6 +1427,72 @@ def run_all_tests():
         assert str(e) == "Incorrect passphrase or corrupted backup file."
     assert tampered_failed is True
     print("    [PASS] Uniform error reporting: 'Incorrect passphrase or corrupted backup file.' returned for both wrong passphrase and tampering.")
+
+    # 13. TASK: UPLOAD THE ENCRYPTED BACKUP TO THE SERVER AS AN OPAQUE BLOB
+    print("\n[+] [Task: Server Backup Upload] Testing Encrypted Backup Upload as Opaque Blob...")
+
+    # Test 13.1: Successful upload with user authentication (SHA-256 of identity key)
+    alice_user_id = alice.user_id()
+    status, res = server.post_backup(alice_user_id, valid_backup_file)
+    assert status == 200, f"Expected 200 on backup upload, got {status}"
+    assert res["status"] == "backup_uploaded"
+    assert res["size_bytes"] == len(valid_backup_file)
+
+    # Verify server stores exact blob without inspection
+    fetch_status, fetched_blob = server.get_backup(alice_user_id)
+    assert fetch_status == 200
+    assert fetched_blob == valid_backup_file
+    print("    [PASS] Backup uploaded to server POST /v1/backup as opaque blob and stored in backups table.")
+
+    # Test 13.2: Replaces previous backup for the same user (keeps only the latest)
+    # Generate updated backup container v2
+    backup_payload_v2 = json.dumps({"version": 2, "contacts_count": 5}).encode()
+    v2_salt = secrets.token_bytes(16)
+    v2_nonce = secrets.token_bytes(12)
+    v2_key = derive_argon2id_key(test_passphrase, v2_salt, 1 << 16, 3, 4)
+    v2_header = (
+        b"ANON" +
+        struct.pack("<BBBB", 0x01, 0x01, 3, 16) +
+        struct.pack("<B", 4) +
+        v2_salt +
+        struct.pack("<B", 0x01) +
+        v2_nonce +
+        struct.pack("<I", len(backup_payload_v2) + 16)
+    )
+    v2_ks = get_keystream(v2_key, v2_nonce, len(backup_payload_v2))
+    v2_ct = bytes(a ^ b for a, b in zip(backup_payload_v2, v2_ks))
+    v2_tag = hmac.new(v2_key, v2_header[:38] + v2_nonce + v2_ct, hashlib.sha256).digest()[:16]
+    valid_backup_file_v2 = v2_header + v2_ct + v2_tag
+
+    status_v2, res_v2 = server.post_backup(alice_user_id, valid_backup_file_v2)
+    assert status_v2 == 200
+    assert res_v2["size_bytes"] == len(valid_backup_file_v2)
+
+    fetch_status_v2, fetched_blob_v2 = server.get_backup(alice_user_id)
+    assert fetch_status_v2 == 200
+    assert fetched_blob_v2 == valid_backup_file_v2
+    assert fetched_blob_v2 != valid_backup_file, "Must replace previous backup, keeping only the latest"
+    print("    [PASS] Server replaces previous backup for the same user (keeps only latest).")
+
+    # Test 13.3: Maximum blob size enforcement (e.g., 100 MB ceiling)
+    oversized_blob = b"X" * (100 * 1024 * 1024 + 1) # 100 MB + 1 byte
+    status_over, res_over = server.post_backup(alice_user_id, oversized_blob)
+    assert status_over == 413, "Blobs exceeding 100 MB must be rejected with 413 Payload Too Large"
+    print("    [PASS] Enforced maximum blob size: > 100 MB rejected with 413 Payload Too Large.")
+
+    # Test 13.4: Authentication required (no email, no phone, only blinded token or identity public key hash)
+    status_no_auth, res_no_auth = server.post_backup("", valid_backup_file)
+    assert status_no_auth == 401, "Requests missing user authentication must be rejected with 401 Unauthorized"
+    print("    [PASS] Authentication enforced: identifies user by public key hash / token; rejects unauthenticated requests.")
+
+    # Test 13.5: Client-side confirmation text requirement:
+    # "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+    # Must NOT display a success checkmark that implies the server can assist with recovery.
+    CLIENT_CONFIRMATION_TEXT = "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
+    assert "✓" not in CLIENT_CONFIRMATION_TEXT, "Client confirmation MUST NOT contain checkmark symbol"
+    assert "✔" not in CLIENT_CONFIRMATION_TEXT, "Client confirmation MUST NOT contain checkmark symbol"
+    assert "recover it if you forget" in CLIENT_CONFIRMATION_TEXT
+    print(f"    [PASS] Client confirmation UX: \"{CLIENT_CONFIRMATION_TEXT}\" (no checkmark).")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

@@ -374,3 +374,8 @@ class BackupContainer {
   }
 }
 
+/// Client-Side Confirmation Invariant:
+/// Displayed after upload without a success checkmark that implies the server can assist with recovery.
+const String backupUploadConfirmation =
+    'Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it.';
+

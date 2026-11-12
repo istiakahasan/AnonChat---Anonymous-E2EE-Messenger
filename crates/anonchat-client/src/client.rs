@@ -149,5 +149,56 @@ impl RelayApiClient {
         let res: QueuePollResponse = response.json().await?;
         Ok(res.messages)
     }
+
+    /// Uploads the encrypted backup to the server as an opaque blob.
+    /// Authenticates with user's SHA-256 identity key hash; server does not inspect contents.
+    pub async fn upload_backup(&self, user_id: &str, backup_bytes: &[u8]) -> Result<()> {
+        let url = format!("{}/v1/backup", self.server_base_url);
+        let blob = backup_bytes.to_vec();
+
+        let response = self
+            .transport
+            .execute_with_retry(|client| {
+                client
+                    .post(&url)
+                    .header("X-User-Id", user_id)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(blob.clone())
+            })
+            .await
+            .context("Failed to upload backup container to relay via Tor")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Relay error {} on /v1/backup: {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Fetches the latest opaque backup blob stored on the server for this user.
+    pub async fn fetch_backup(&self, user_id: &str) -> Result<Vec<u8>> {
+        let url = format!("{}/v1/backup/{}", self.server_base_url, user_id);
+
+        let response = self
+            .transport
+            .execute_with_retry(|client| client.get(&url))
+            .await
+            .context("Failed to fetch backup container from relay via Tor")?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            anyhow::bail!("No backup found on server for user {}", user_id);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Relay error {} on /v1/backup/{}: {}", status, user_id, body);
+        }
+
+        let bytes = response.bytes().await?;
+        Ok(bytes.to_vec())
+    }
 }
 

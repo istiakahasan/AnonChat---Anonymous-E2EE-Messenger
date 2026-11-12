@@ -23,6 +23,14 @@ pub struct QueuedMessage {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredBackup {
+    pub user_id: String,
+    pub blob: Vec<u8>,
+    pub created_at: DateTime<Utc>,
+    pub size_bytes: i64,
+}
+
 /// Abstract Storage Interface for the Blind Relay
 #[async_trait::async_trait]
 pub trait RelayStorage: Send + Sync {
@@ -38,6 +46,13 @@ pub trait RelayStorage: Send + Sync {
 
     /// Fetches all queued messages for a user and ATOMICALLY DELETES them.
     async fn drain_messages(&self, user_id: &str) -> Result<Vec<QueuedMessage>>;
+
+    /// Stores or replaces the user's latest encrypted backup blob.
+    /// Kept strictly as an opaque blob; previous backups are replaced.
+    async fn save_backup(&self, user_id: &str, blob: Vec<u8>) -> Result<()>;
+
+    /// Fetches the user's latest encrypted backup blob.
+    async fn get_backup(&self, user_id: &str) -> Result<Option<StoredBackup>>;
 }
 
 /// In-Memory Storage Engine with fine-grained async locking.
@@ -50,6 +65,8 @@ pub struct MemoryRelayStorage {
     opk_pools: RwLock<HashMap<String, Vec<PublicOneTimePreKey>>>,
     /// Messages queued per recipient_id
     queues: RwLock<HashMap<String, Vec<QueuedMessage>>>,
+    /// Backups stored per user_id (replaces previous, keeps latest)
+    backups: RwLock<HashMap<String, StoredBackup>>,
 }
 
 #[derive(Clone)]
@@ -148,6 +165,27 @@ impl RelayStorage for MemoryRelayStorage {
         let messages = queues.remove(user_id).unwrap_or_default();
         Ok(messages)
     }
+
+    async fn save_backup(&self, user_id: &str, blob: Vec<u8>) -> Result<()> {
+        let size_bytes = blob.len() as i64;
+        let mut backups = self.backups.write().await;
+        // Server-Side Requirement: Replace previous backups for the same user (keep only latest)
+        backups.insert(
+            user_id.to_string(),
+            StoredBackup {
+                user_id: user_id.to_string(),
+                blob,
+                created_at: Utc::now(),
+                size_bytes,
+            },
+        );
+        Ok(())
+    }
+
+    async fn get_backup(&self, user_id: &str) -> Result<Option<StoredBackup>> {
+        let backups = self.backups.read().await;
+        Ok(backups.get(user_id).cloned())
+    }
 }
 
 /// PostgreSQL Relay Storage Implementation using SQLx.
@@ -196,6 +234,13 @@ impl PostgresRelayStorage {
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id);
+
+            CREATE TABLE IF NOT EXISTS backups (
+                user_id VARCHAR(64) PRIMARY KEY,
+                blob BYTEA NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                size_bytes BIGINT NOT NULL
+            );
             "#,
         )
         .execute(&self.pool)
@@ -348,6 +393,50 @@ impl RelayStorage for PostgresRelayStorage {
             .collect();
 
         Ok(messages)
+    }
+
+    async fn save_backup(&self, user_id: &str, blob: Vec<u8>) -> Result<()> {
+        let size_bytes = blob.len() as i64;
+        sqlx::query(
+            r#"
+            INSERT INTO backups (user_id, blob, created_at, size_bytes)
+            VALUES ($1, $2, NOW(), $3)
+            ON CONFLICT (user_id) DO UPDATE SET
+                blob = EXCLUDED.blob,
+                created_at = NOW(),
+                size_bytes = EXCLUDED.size_bytes;
+            "#,
+        )
+        .bind(user_id)
+        .bind(blob)
+        .bind(size_bytes)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_backup(&self, user_id: &str) -> Result<Option<StoredBackup>> {
+        let row = sqlx::query(
+            r#"
+            SELECT user_id, blob, created_at, size_bytes
+            FROM backups
+            WHERE user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            use sqlx::Row;
+            StoredBackup {
+                user_id: r.get(0),
+                blob: r.get(1),
+                created_at: r.get(2),
+                size_bytes: r.get(3),
+            }
+        }))
     }
 }
 
