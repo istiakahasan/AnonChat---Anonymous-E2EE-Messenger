@@ -58,6 +58,39 @@ export function padBackup(data: Uint8Array): Uint8Array {
   return padToBlockSize(data, DEFAULT_BACKUP_BLOCK_SIZE);
 }
 
+/// Minimum allowed padding block size to prevent side channels (4 KiB = 4096 bytes) (Sub-Step 6.2).
+export const MIN_PADDING_BLOCK_SIZE = 4096;
+
+/**
+ * Enforces the no-side-channel security policy for the backup pipeline (Sub-Step 6.2).
+ */
+export interface BackupSecurityPolicy {
+  compressionEnabled?: boolean;
+  deduplicationEnabled?: boolean;
+  backupIsFullNotIncremental?: boolean;
+  paddingBlockSize?: number;
+}
+
+export function enforceBackupSecurityPolicy(policy: BackupSecurityPolicy = {}): void {
+  const compressionEnabled = policy.compressionEnabled ?? false;
+  const deduplicationEnabled = policy.deduplicationEnabled ?? false;
+  const backupIsFullNotIncremental = policy.backupIsFullNotIncremental ?? true;
+  const paddingBlockSize = policy.paddingBlockSize ?? DEFAULT_BACKUP_BLOCK_SIZE;
+
+  if (paddingBlockSize < MIN_PADDING_BLOCK_SIZE) {
+    throw new Error('Backup security policy violation: Padding block too small (minimum 4096 bytes required)');
+  }
+  if (compressionEnabled) {
+    throw new Error('Backup security policy violation: Compression must be disabled');
+  }
+  if (deduplicationEnabled) {
+    throw new Error('Backup security policy violation: Deduplication must be disabled');
+  }
+  if (!backupIsFullNotIncremental) {
+    throw new Error('Backup security policy violation: Incremental backups forbidden');
+  }
+}
+
 export interface BackupHeader {
   magic: Uint8Array;
   version: number;

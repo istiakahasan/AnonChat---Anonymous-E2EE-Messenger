@@ -38,6 +38,51 @@ const int maxAllowedParallelism = 4;
 /// Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1).
 const int defaultBackupBlockSize = 65536;
 
+/// Minimum allowed padding block size to prevent side channels (4 KiB = 4096 bytes) (Sub-Step 6.2).
+const int minPaddingBlockSize = 4096;
+
+/// Enforces the no-side-channel security policy for the backup pipeline (Sub-Step 6.2).
+///
+/// Features that MUST NOT exist:
+/// - No compression before encryption.
+/// - No deduplication.
+/// - No size-preserving encryption (without fixed-block padding).
+/// - No incremental or differential backups.
+/// - No backup chaining.
+class BackupSecurityPolicy {
+  final bool compressionEnabled;
+  final bool deduplicationEnabled;
+  final bool backupIsFullNotIncremental;
+  final int paddingBlockSize;
+
+  const BackupSecurityPolicy({
+    this.compressionEnabled = false,
+    this.deduplicationEnabled = false,
+    this.backupIsFullNotIncremental = true,
+    this.paddingBlockSize = defaultBackupBlockSize,
+  });
+
+  void enforce() {
+    assert(paddingBlockSize >= minPaddingBlockSize, 'Padding block too small');
+    assert(!compressionEnabled, 'Compression must be disabled');
+    assert(!deduplicationEnabled, 'Deduplication must be disabled');
+    assert(backupIsFullNotIncremental, 'Incremental backups forbidden');
+
+    if (paddingBlockSize < minPaddingBlockSize) {
+      throw const FormatException('Backup security policy violation: Padding block too small (minimum 4096 bytes required)');
+    }
+    if (compressionEnabled) {
+      throw const FormatException('Backup security policy violation: Compression must be disabled');
+    }
+    if (deduplicationEnabled) {
+      throw const FormatException('Backup security policy violation: Deduplication must be disabled');
+    }
+    if (!backupIsFullNotIncremental) {
+      throw const FormatException('Backup security policy violation: Incremental backups forbidden');
+    }
+  }
+}
+
 /// Enforces passphrase policy before key derivation:
 /// - Automatically recognizes and validates high-entropy recovery codes (24 BIP39 words or 52 Base32 characters).
 /// - For custom passphrases: minimum 12 characters, character diversity, and monotonic pattern rejection.
@@ -327,7 +372,9 @@ class BackupContainer {
     int parallelism = 1,
     Uint8List? freshSalt,
     Uint8List? freshNonce,
+    BackupSecurityPolicy policy = const BackupSecurityPolicy(),
   }) async {
+    policy.enforce();
     validatePassphrase(passphrase);
     final salt = freshSalt ??
         Uint8List.fromList(List<int>.generate(

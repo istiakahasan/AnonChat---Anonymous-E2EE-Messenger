@@ -509,27 +509,29 @@ fn pad_to_block_size(data: Vec<u8>, block_size: usize) -> Vec<u8> {
 
 ---
 
-### 6.3 Forbidden-Features Checklist
+### 6.3 Forbidden-Features Checklist (Sub-Step 6.2)
 
-To eliminate side-channel vulnerabilities across all client platforms, the following features are strictly prohibited:
+To enforce a strict no-side-channel policy for the backup pipeline, the following 5 features **MUST NOT EXIST**:
 
-| Prohibited Feature | Attack Prevented | Implementation Rule |
-| :--- | :--- | :--- |
-| **No Compression Before Encryption** | CRIME / BREACH / WhatsApp file-recovery attacks [citation:22] where compression ratio leaks plaintext vocabulary and redundancy. | Backups must NEVER pass plaintext through `gzip`, `zlib`, `brotli`, or `deflate` before encryption. |
-| **No Cross-Backup Deduplication** | Confirmation attacks probing whether a target owns specific messages or files via convergent encryption. | Every backup MUST generate a fresh, cryptographically secure 16-byte random salt and 12-byte nonce. |
-| **No Variable-Length Headers** | Metadata leakage revealing username length, conversation count, or device tags. | Container header is strictly fixed at 42 bytes (little-endian binary). |
-| **No Unpadded File Sizes** | Activity pattern leakage and file size fingerprinting. | All stored/uploaded backups MUST be padded to a multiple of 64 KiB. |
-| **No Detailed Error Messages** | Padding oracle and chosen-ciphertext side channels. | Any decryption or authentication failure must produce the identical uniform error string: `"Incorrect passphrase or corrupted backup file."` |
+1. **No compression before encryption**:
+   - *Requirement*: Do not call `zlib`, `gzip`, `brotli`, or any compressor on the plaintext before AES-GCM.
+   - *Threat*: Compression ratios vary based on plaintext content, vocabulary, and redundancy. An attacker observing backup file size differences can infer message contents or confirm specific files [citation:22].
+2. **No deduplication**:
+   - *Requirement*: Do not store attachments or message blocks by content hash. Do not skip storing a block because an identical block was already stored.
+   - *Threat*: Deduplication creates size dependencies across backups, enabling cross-backup confirmation attacks [citation:22].
+3. **No size-preserving encryption**:
+   - *Requirement*: AES-GCM preserves plaintext size (adding only the 16-byte authentication tag). Do not add any custom layer that maps different plaintext sizes to the same ciphertext size or vice versa without post-encryption fixed-block padding.
+4. **No incremental or differential backup**:
+   - *Requirement*: Each backup must be a complete, independently decryptable snapshot blob. Do not store "only the changes since last backup" — differential backups leak which parts changed and activity velocity.
+5. **No backup chaining**:
+   - *Requirement*: Do not reference previous backups by hash, parent ID, or chain index in a way that reveals chronological relationships between backup versions.
 
-
-
-
-
-
-
-
-
-
-
-
-
+#### Code Review Assertions
+Every backup creation path across all platforms must enforce these exact assertions before execution:
+```rust
+// In the backup creation path, assert:
+assert!(padding_block_size >= 4096, "Padding block too small");
+assert!(!compression_enabled, "Compression must be disabled");
+assert!(!deduplication_enabled, "Deduplication must be disabled");
+assert!(backup_is_full_not_incremental, "Incremental backups forbidden");
+```

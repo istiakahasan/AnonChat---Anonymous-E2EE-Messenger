@@ -46,6 +46,34 @@ object BackupContainer {
 
     // Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1)
     const val DEFAULT_BACKUP_BLOCK_SIZE = 65536
+    const val MIN_PADDING_BLOCK_SIZE = 4096
+
+    data class SecurityPolicy(
+        val compressionEnabled: Boolean = false,
+        val deduplicationEnabled: Boolean = false,
+        val backupIsFullNotIncremental: Boolean = true,
+        val paddingBlockSize: Int = DEFAULT_BACKUP_BLOCK_SIZE
+    ) {
+        fun enforce() {
+            assert(paddingBlockSize >= MIN_PADDING_BLOCK_SIZE) { "Padding block too small" }
+            assert(!compressionEnabled) { "Compression must be disabled" }
+            assert(!deduplicationEnabled) { "Deduplication must be disabled" }
+            assert(backupIsFullNotIncremental) { "Incremental backups forbidden" }
+
+            require(paddingBlockSize >= MIN_PADDING_BLOCK_SIZE) {
+                "Backup security policy violation: Padding block too small (minimum 4096 bytes required)"
+            }
+            require(!compressionEnabled) {
+                "Backup security policy violation: Compression must be disabled"
+            }
+            require(!deduplicationEnabled) {
+                "Backup security policy violation: Deduplication must be disabled"
+            }
+            require(backupIsFullNotIncremental) {
+                "Backup security policy violation: Incremental backups forbidden"
+            }
+        }
+    }
 
     // Client-Side Confirmation Invariant (no success checkmark)
     const val BACKUP_UPLOAD_CONFIRMATION =

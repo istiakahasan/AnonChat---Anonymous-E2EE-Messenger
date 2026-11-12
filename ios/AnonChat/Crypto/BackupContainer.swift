@@ -35,6 +35,46 @@ public struct BackupContainer {
 
     // Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1)
     public static let defaultBackupBlockSize: Int = 65536
+    public static let minPaddingBlockSize: Int = 4096
+
+    public struct SecurityPolicy: Equatable {
+        public let compressionEnabled: Bool
+        public let deduplicationEnabled: Bool
+        public let backupIsFullNotIncremental: Bool
+        public let paddingBlockSize: Int
+
+        public init(
+            compressionEnabled: Bool = false,
+            deduplicationEnabled: Bool = false,
+            backupIsFullNotIncremental: Bool = true,
+            paddingBlockSize: Int = BackupContainer.defaultBackupBlockSize
+        ) {
+            self.compressionEnabled = compressionEnabled
+            self.deduplicationEnabled = deduplicationEnabled
+            self.backupIsFullNotIncremental = backupIsFullNotIncremental
+            self.paddingBlockSize = paddingBlockSize
+        }
+
+        public func enforce() throws {
+            assert(paddingBlockSize >= BackupContainer.minPaddingBlockSize, "Padding block too small")
+            assert(!compressionEnabled, "Compression must be disabled")
+            assert(!deduplicationEnabled, "Deduplication must be disabled")
+            assert(backupIsFullNotIncremental, "Incremental backups forbidden")
+
+            guard paddingBlockSize >= BackupContainer.minPaddingBlockSize else {
+                throw BackupError.weakPassphrase("Padding block too small")
+            }
+            guard !compressionEnabled else {
+                throw BackupError.weakPassphrase("Compression must be disabled")
+            }
+            guard !deduplicationEnabled else {
+                throw BackupError.weakPassphrase("Deduplication must be disabled")
+            }
+            guard backupIsFullNotIncremental else {
+                throw BackupError.weakPassphrase("Incremental backups forbidden")
+            }
+        }
+    }
 
     // Client-Side Confirmation Invariant (no success checkmark)
     public static let backupUploadConfirmation: String =

@@ -82,6 +82,9 @@ pub const MAX_ALLOWED_PARALLELISM: u8 = 4;
 /// Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1).
 pub const DEFAULT_BACKUP_BLOCK_SIZE: usize = 65536;
 
+/// Minimum allowed padding block size to prevent side channels (4 KiB = 4096 bytes) (Sub-Step 6.2).
+pub const MIN_PADDING_BLOCK_SIZE: usize = 4096;
+
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum BackupContainerError {
     #[error("Header too short: expected at least 42 bytes, got {0}")]
@@ -116,6 +119,70 @@ pub enum BackupContainerError {
     WeakPassphrase(String),
     #[error("Argon2 key derivation error: {0}")]
     KdfError(String),
+    #[error("Backup security policy violation: {0}")]
+    SecurityPolicyViolation(String),
+}
+
+/// Enforces the no-side-channel security policy for the backup pipeline (Sub-Step 6.2).
+///
+/// Features that MUST NOT exist:
+/// - No compression before encryption (CRIME/BREACH/WhatsApp defense).
+/// - No deduplication (prevents cross-backup size leakage).
+/// - No incremental or differential backups (each backup must be a full, independent snapshot).
+/// - Mandatory post-encryption fixed-block padding (minimum 4096 bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackupSecurityPolicy {
+    /// Compression must be disabled to prevent CRIME/BREACH/WhatsApp-style size-leakage attacks.
+    pub compression_enabled: bool,
+    /// Deduplication must be disabled to prevent cross-backup confirmation attacks.
+    pub deduplication_enabled: bool,
+    /// Backups must be full snapshots, never incremental or differential.
+    pub backup_is_full_not_incremental: bool,
+    /// Block size used for post-encryption fixed-block padding (minimum 4096 bytes).
+    pub padding_block_size: usize,
+}
+
+impl Default for BackupSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            compression_enabled: false,
+            deduplication_enabled: false,
+            backup_is_full_not_incremental: true,
+            padding_block_size: DEFAULT_BACKUP_BLOCK_SIZE,
+        }
+    }
+}
+
+impl BackupSecurityPolicy {
+    /// Validates the no-side-channel security policy assertions.
+    pub fn enforce(&self) -> Result<(), BackupContainerError> {
+        assert!(self.padding_block_size >= MIN_PADDING_BLOCK_SIZE, "Padding block too small");
+        assert!(!self.compression_enabled, "Compression must be disabled");
+        assert!(!self.deduplication_enabled, "Deduplication must be disabled");
+        assert!(self.backup_is_full_not_incremental, "Incremental backups forbidden");
+
+        if self.padding_block_size < MIN_PADDING_BLOCK_SIZE {
+            return Err(BackupContainerError::SecurityPolicyViolation(
+                "Padding block too small".into(),
+            ));
+        }
+        if self.compression_enabled {
+            return Err(BackupContainerError::SecurityPolicyViolation(
+                "Compression must be disabled".into(),
+            ));
+        }
+        if self.deduplication_enabled {
+            return Err(BackupContainerError::SecurityPolicyViolation(
+                "Deduplication must be disabled".into(),
+            ));
+        }
+        if !self.backup_is_full_not_incremental {
+            return Err(BackupContainerError::SecurityPolicyViolation(
+                "Incremental backups forbidden".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Self-describing header representing the first 42 bytes of an AnonChat backup container.
@@ -528,6 +595,27 @@ impl BackupContainer {
         memory_exponent: u8,
         parallelism: u8,
     ) -> Result<Self, BackupContainerError> {
+        Self::encrypt_with_policy(
+            key_256,
+            plaintext,
+            time_cost,
+            memory_exponent,
+            parallelism,
+            BackupSecurityPolicy::default(),
+        )
+    }
+
+    /// Encrypts plaintext payload enforcing an explicit BackupSecurityPolicy.
+    pub fn encrypt_with_policy(
+        key_256: &[u8; 32],
+        plaintext: &[u8],
+        time_cost: u8,
+        memory_exponent: u8,
+        parallelism: u8,
+        policy: BackupSecurityPolicy,
+    ) -> Result<Self, BackupContainerError> {
+        policy.enforce()?;
+
         let ciphertext_len = (plaintext.len() + BACKUP_TAG_SIZE) as u32;
         let header = BackupHeader::with_params(time_cost, memory_exponent, parallelism, ciphertext_len);
         let aad = header.aad_bytes();
@@ -551,7 +639,8 @@ impl BackupContainer {
     /// 2. Generates a fresh 16-byte random salt and 12-byte nonce.
     /// 3. Derives 256-bit AES key using Argon2id with memory_kib = 1 << memory_exponent.
     /// 4. Authenticates header bytes 0..37 as AES-256-GCM AAD.
-    /// 5. Automatically zeroizes the derived key on completion.
+    /// 5. Enforces the no-side-channel security policy assertions.
+    /// 6. Automatically zeroizes the derived key on completion.
     pub fn encrypt_with_passphrase(
         passphrase: &str,
         plaintext: &[u8],
@@ -559,6 +648,27 @@ impl BackupContainer {
         memory_exponent: u8,
         parallelism: u8,
     ) -> Result<Self, BackupContainerError> {
+        Self::encrypt_with_passphrase_and_policy(
+            passphrase,
+            plaintext,
+            time_cost,
+            memory_exponent,
+            parallelism,
+            BackupSecurityPolicy::default(),
+        )
+    }
+
+    /// Encrypts plaintext payload with user passphrase and an explicit BackupSecurityPolicy.
+    pub fn encrypt_with_passphrase_and_policy(
+        passphrase: &str,
+        plaintext: &[u8],
+        time_cost: u8,
+        memory_exponent: u8,
+        parallelism: u8,
+        policy: BackupSecurityPolicy,
+    ) -> Result<Self, BackupContainerError> {
+        policy.enforce()?;
+
         let ciphertext_len = (plaintext.len() + BACKUP_TAG_SIZE) as u32;
         let header = BackupHeader::with_params(time_cost, memory_exponent, parallelism, ciphertext_len);
 

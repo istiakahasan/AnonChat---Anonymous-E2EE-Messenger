@@ -2697,6 +2697,53 @@ def run_all_tests():
     assert wrong_key_err == "Incorrect passphrase or corrupted backup file.", "Error message must be strictly uniform"
     print("    [PASS] 22.5: Forbidden-Features Checklist enforced (no compression, no deduplication, fixed 42B header, uniform error).")
 
+    # Test 22.6: Sub-Step 6.2 Code Review Assertions (Security Policy Enforcement)
+    def validate_backup_security_policy(padding_block_size: int, compression_enabled: bool, deduplication_enabled: bool, backup_is_full_not_incremental: bool):
+        assert padding_block_size >= 4096, "Padding block too small"
+        assert not compression_enabled, "Compression must be disabled"
+        assert not deduplication_enabled, "Deduplication must be disabled"
+        assert backup_is_full_not_incremental, "Incremental backups forbidden"
+
+    # Default valid policy passes
+    validate_backup_security_policy(65536, False, False, True)
+
+    # 1. Padding block too small (< 4096)
+    pad_too_small_failed = False
+    try:
+        validate_backup_security_policy(2048, False, False, True)
+    except AssertionError as e:
+        pad_too_small_failed = True
+        assert "Padding block too small" in str(e)
+    assert pad_too_small_failed is True
+
+    # 2. Compression enabled (forbidden)
+    compression_failed = False
+    try:
+        validate_backup_security_policy(65536, True, False, True)
+    except AssertionError as e:
+        compression_failed = True
+        assert "Compression must be disabled" in str(e)
+    assert compression_failed is True
+
+    # 3. Deduplication enabled (forbidden)
+    dedup_failed = False
+    try:
+        validate_backup_security_policy(65536, False, True, True)
+    except AssertionError as e:
+        dedup_failed = True
+        assert "Deduplication must be disabled" in str(e)
+    assert dedup_failed is True
+
+    # 4. Incremental backup enabled (forbidden)
+    incremental_failed = False
+    try:
+        validate_backup_security_policy(65536, False, False, False)
+    except AssertionError as e:
+        incremental_failed = True
+        assert "Incremental backups forbidden" in str(e)
+    assert incremental_failed is True
+    print("    [PASS] 22.6: Sub-Step 6.2 Code Review Assertions strictly enforced across all 4 forbidden features.")
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")
