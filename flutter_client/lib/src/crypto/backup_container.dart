@@ -26,6 +26,7 @@ const int backupHeaderSize = 42;
 const int backupSaltSize = 16;
 const int backupNonceSize = 12;
 const int backupTagSize = 16;
+const int backupAadSize = 38;
 const int minPassphraseLen = 12;
 
 /// Enforces passphrase policy before key derivation:
@@ -293,12 +294,13 @@ class BackupContainer {
     );
 
     final headerBytes = header.toBytes();
+    final aad = headerBytes.sublist(0, backupAadSize);
     final aesGcm = AesGcm.with256Bits();
     final secretBox = await aesGcm.encrypt(
       plaintext,
       secretKey: SecretKey(keyBytes),
       nonce: nonce,
-      aad: headerBytes,
+      aad: aad,
     );
 
     final ciphertext = Uint8List(secretBox.cipherText.length + secretBox.mac.bytes.length);
@@ -308,7 +310,7 @@ class BackupContainer {
     return BackupContainer(header: header, ciphertext: ciphertext);
   }
 
-  /// High-level container decryption with user passphrase verifying 42-byte header AAD.
+  /// High-level container decryption with user passphrase verifying header bytes 0..37 as AAD.
   Future<Uint8List> decryptWithPassphrase(String passphrase) async {
     validatePassphrase(passphrase);
     final keyBytes = await deriveBackupKey(
@@ -324,6 +326,7 @@ class BackupContainer {
     }
 
     final headerBytes = header.toBytes();
+    final aad = headerBytes.sublist(0, backupAadSize);
     final ptLen = ciphertext.length - backupTagSize;
     final cipherOnly = ciphertext.sublist(0, ptLen);
     final macBytes = ciphertext.sublist(ptLen);
@@ -338,7 +341,7 @@ class BackupContainer {
     final decrypted = await aesGcm.decrypt(
       secretBox,
       secretKey: SecretKey(keyBytes),
-      aad: headerBytes,
+      aad: aad,
     );
 
     return Uint8List.fromList(decrypted);

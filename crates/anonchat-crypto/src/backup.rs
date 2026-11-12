@@ -25,7 +25,7 @@
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes256Gcm, Nonce,
+    Aes256Gcm, Key, Nonce,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand_core::{OsRng, RngCore};
@@ -58,6 +58,11 @@ pub const BACKUP_TAG_SIZE: usize = 16;
 
 /// Exact size of the container header in bytes.
 pub const BACKUP_HEADER_SIZE: usize = 42;
+
+/// Size of the Additional Authenticated Data (AAD): offsets 0 to 37 (38 bytes total).
+/// Encompasses magic, version, kdf_id, time_cost, memory_exponent, parallelism, salt, cipher_id, and nonce
+/// (everything before the ciphertext length field).
+pub const BACKUP_AAD_SIZE: usize = 38;
 
 /// Default Argon2id parameters recommended for mobile & desktop backups:
 /// - time_cost: 3 iterations
@@ -181,6 +186,23 @@ impl BackupHeader {
         bytes[26..38].copy_from_slice(&self.nonce);
         bytes[38..42].copy_from_slice(&self.ciphertext_len.to_le_bytes());
         bytes
+    }
+
+    /// Extracts the 38-byte AAD representation: header bytes from offset 0 to 37
+    /// (everything before the ciphertext length field).
+    /// Used by AES-256-GCM to bind header parameters to the ciphertext.
+    pub fn aad_bytes(&self) -> [u8; BACKUP_AAD_SIZE] {
+        let mut aad = [0u8; BACKUP_AAD_SIZE];
+        aad[0..4].copy_from_slice(&self.magic);
+        aad[4] = self.version;
+        aad[5] = self.kdf_id;
+        aad[6] = self.time_cost;
+        aad[7] = self.memory_exponent;
+        aad[8] = self.parallelism;
+        aad[9..25].copy_from_slice(&self.salt);
+        aad[25] = self.cipher_id;
+        aad[26..38].copy_from_slice(&self.nonce);
+        aad
     }
 
     /// Parses and validates a 42-byte binary header.
@@ -355,6 +377,58 @@ pub fn derive_key_from_header(
     )
 }
 
+/// Encrypts the serialized backup payload with AES-256-GCM (Sub-Step 3.3).
+///
+/// # Inputs:
+/// - `plaintext`: the serialized backup bytes (from Sub-Step 3.1).
+/// - `key`: 32-byte derived key (from Sub-Step 3.2).
+/// - `nonce`: 12 random bytes, fresh for every encryption. Never reuse a nonce with the same key.
+/// - `aad`: the header bytes from offset 0 to 37 (everything before the ciphertext length field).
+///   This binds the header parameters to the ciphertext and detects tampering.
+///
+/// Output includes the 16-byte GCM authentication tag at the end.
+pub fn encrypt_payload(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+) -> Result<Vec<u8>, BackupContainerError> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| BackupContainerError::EncryptionFailed)?;
+    Ok(ciphertext)
+}
+
+/// Decrypts the backup payload with AES-256-GCM, verifying the AAD.
+pub fn decrypt_payload(
+    ciphertext: &[u8],
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+) -> Result<Vec<u8>, BackupContainerError> {
+    if ciphertext.len() < BACKUP_TAG_SIZE {
+        return Err(BackupContainerError::CiphertextTooShort(ciphertext.len()));
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| BackupContainerError::DecryptionFailed)?;
+    Ok(plaintext)
+}
+
 /// Complete AnonChat Backup Container (42-byte header + N-byte ciphertext).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupContainer {
@@ -366,8 +440,8 @@ impl BackupContainer {
     /// Encrypts plaintext payload with a derived 256-bit AES key and creates the container.
     ///
     /// Cryptographic Invariant:
-    /// The entire 42-byte header is used as Additional Authenticated Data (AAD) for AES-256-GCM.
-    /// Any tampering with KDF parameters, version, salt, nonce, or ciphertext length
+    /// Header bytes 0..37 (everything before ciphertext length) are used as AAD for AES-256-GCM.
+    /// Any tampering with KDF parameters, version, salt, cipher_id, or nonce
     /// will cause authentication to fail immediately.
     pub fn encrypt(
         key_256: &[u8; 32],
@@ -378,48 +452,19 @@ impl BackupContainer {
     ) -> Result<Self, BackupContainerError> {
         let ciphertext_len = (plaintext.len() + BACKUP_TAG_SIZE) as u32;
         let header = BackupHeader::with_params(time_cost, memory_exponent, parallelism, ciphertext_len);
-        let header_bytes = header.to_bytes();
+        let aad = header.aad_bytes();
 
-        let cipher = Aes256Gcm::new_from_slice(key_256)
-            .map_err(|_| BackupContainerError::EncryptionFailed)?;
-        let nonce = Nonce::from_slice(&header.nonce);
-
-        let payload = Payload {
-            msg: plaintext,
-            aad: &header_bytes,
-        };
-
-        let ciphertext = cipher
-            .encrypt(nonce, payload)
-            .map_err(|_| BackupContainerError::EncryptionFailed)?;
-
+        let ciphertext = encrypt_payload(plaintext, key_256, &header.nonce, &aad)?;
         debug_assert_eq!(ciphertext.len(), ciphertext_len as usize);
 
         Ok(Self { header, ciphertext })
     }
 
     /// Decrypts the container ciphertext using the derived 256-bit key.
-    /// Validates GCM authentication tag against both ciphertext and the 42-byte header AAD.
+    /// Validates GCM authentication tag against both ciphertext and the 38-byte header AAD.
     pub fn decrypt(&self, key_256: &[u8; 32]) -> Result<Vec<u8>, BackupContainerError> {
-        if self.ciphertext.len() < BACKUP_TAG_SIZE {
-            return Err(BackupContainerError::CiphertextTooShort(self.ciphertext.len()));
-        }
-
-        let header_bytes = self.header.to_bytes();
-        let cipher = Aes256Gcm::new_from_slice(key_256)
-            .map_err(|_| BackupContainerError::DecryptionFailed)?;
-        let nonce = Nonce::from_slice(&self.header.nonce);
-
-        let payload = Payload {
-            msg: &self.ciphertext,
-            aad: &header_bytes,
-        };
-
-        let plaintext = cipher
-            .decrypt(nonce, payload)
-            .map_err(|_| BackupContainerError::DecryptionFailed)?;
-
-        Ok(plaintext)
+        let aad = self.header.aad_bytes();
+        decrypt_payload(&self.ciphertext, key_256, &self.header.nonce, &aad)
     }
 
     /// Encrypts plaintext payload using a user passphrase.
@@ -427,7 +472,7 @@ impl BackupContainer {
     /// 1. Validates passphrase strength (minimum length & entropy).
     /// 2. Generates a fresh 16-byte random salt and 12-byte nonce.
     /// 3. Derives 256-bit AES key using Argon2id with memory_kib = 1 << memory_exponent.
-    /// 4. Authenticates the full 42-byte header as AES-256-GCM AAD.
+    /// 4. Authenticates header bytes 0..37 as AES-256-GCM AAD.
     /// 5. Automatically zeroizes the derived key on completion.
     pub fn encrypt_with_passphrase(
         passphrase: &str,
@@ -448,19 +493,8 @@ impl BackupContainer {
             parallelism as u32,
         )?;
 
-        let header_bytes = header.to_bytes();
-        let cipher = Aes256Gcm::new_from_slice(&*key)
-            .map_err(|_| BackupContainerError::EncryptionFailed)?;
-        let nonce = Nonce::from_slice(&header.nonce);
-
-        let payload = Payload {
-            msg: plaintext,
-            aad: &header_bytes,
-        };
-
-        let ciphertext = cipher
-            .encrypt(nonce, payload)
-            .map_err(|_| BackupContainerError::EncryptionFailed)?;
+        let aad = header.aad_bytes();
+        let ciphertext = encrypt_payload(plaintext, &*key, &header.nonce, &aad)?;
 
         Ok(Self { header, ciphertext })
     }

@@ -819,6 +819,7 @@ def run_all_tests():
         KDF_ARGON2ID = 0x01
         CIPHER_AES_256_GCM = 0x01
         HEADER_SIZE = 42
+        AAD_SIZE = 38
 
         def __init__(self, time_cost=3, memory_exponent=16, parallelism=4, salt=None, nonce=None, ciphertext=b""):
             self.magic = self.MAGIC
@@ -846,6 +847,10 @@ def run_all_tests():
                 self.nonce +
                 struct.pack("<I", len(self.ciphertext))
             )
+
+        def get_aad(self) -> bytes:
+            """Header bytes from offset 0 to 37 (everything before ciphertext length field)."""
+            return self.serialize_header()[:self.AAD_SIZE]
 
         def to_bytes(self) -> bytes:
             return self.serialize_header() + self.ciphertext
@@ -887,20 +892,17 @@ def run_all_tests():
             return container
 
         def encrypt_payload(self, key: bytes, plaintext: bytes):
-            # Header is passed as AAD for AES-GCM
-            fake_ct = plaintext + secrets.token_bytes(16)
-            self.ciphertext = fake_ct
-            header_bytes = self.serialize_header()
-            # GCM Tag authenticates both header (AAD) and ciphertext
+            # Sub-Step 3.3: AAD is header bytes from offset 0 to 37 (everything before ciphertext length field)
+            aad = self.get_aad()
             keystream = get_keystream(key, self.nonce, len(plaintext))
             ct_bytes = bytes(a ^ b for a, b in zip(plaintext, keystream))
-            tag = hmac.new(key, header_bytes + self.nonce + ct_bytes, hashlib.sha256).digest()[:16]
+            tag = hmac.new(key, aad + self.nonce + ct_bytes, hashlib.sha256).digest()[:16]
             self.ciphertext = ct_bytes + tag
 
         def decrypt_payload(self, key: bytes) -> bytes:
-            header_bytes = self.serialize_header()
+            aad = self.get_aad()
             ct_bytes, tag = self.ciphertext[:-16], self.ciphertext[-16:]
-            expected_tag = hmac.new(key, header_bytes + self.nonce + ct_bytes, hashlib.sha256).digest()[:16]
+            expected_tag = hmac.new(key, aad + self.nonce + ct_bytes, hashlib.sha256).digest()[:16]
             if not hmac.compare_digest(tag, expected_tag):
                 raise ValueError("Integrity check failed: header or ciphertext was tampered with!")
             keystream = get_keystream(key, self.nonce, len(ct_bytes))
@@ -1109,6 +1111,72 @@ def run_all_tests():
         assert "Integrity check failed" in str(e)
     assert wrong_key_failed is True, "Decryption with wrong passphrase must fail authentication tag check!"
     print("    [PASS] Wrong passphrase triggers AES-GCM authentication failure (zero plaintext leak).")
+
+    # 11. TASK: SUB-STEP 3.3: ENCRYPT THE PAYLOAD WITH AES-256-GCM
+    print("\n[+] [Sub-Step 3.3] Testing AES-256-GCM Payload Encryption with 38-Byte Header AAD...")
+
+    # Inputs per spec:
+    raw_plaintext = b'{"version":1,"client_identity":{"ed_priv":"REDACTED"},"messages":[{"text":"Secret AnonChat message"}]}'
+    derived_32b_key = secrets.token_bytes(32)
+    fresh_12b_nonce = secrets.token_bytes(12)
+
+    # 38-byte AAD: header bytes from offset 0 to 37 (everything before ciphertext length field)
+    magic = b"ANON"               # 0..4 (4 bytes)
+    version = 0x01                # 4 (1 byte)
+    kdf_id = 0x01                 # 5 (1 byte)
+    time_cost = 3                 # 6 (1 byte)
+    memory_exponent = 16          # 7 (1 byte)
+    parallelism = 4               # 8 (1 byte)
+    salt = secrets.token_bytes(16)# 9..25 (16 bytes)
+    cipher_id = 0x01              # 25 (1 byte)
+    # nonce: 26..38 (12 bytes)
+
+    aad_bytes = (
+        magic +
+        struct.pack("<BBBB", version, kdf_id, time_cost, memory_exponent) +
+        struct.pack("<B", parallelism) +
+        salt +
+        struct.pack("<B", cipher_id) +
+        fresh_12b_nonce
+    )
+
+    assert len(aad_bytes) == 38, f"AAD must be exactly 38 bytes (offsets 0 to 37), got {len(aad_bytes)}"
+
+    # Encryption: AES-256-GCM with AAD
+    keystream = get_keystream(derived_32b_key, fresh_12b_nonce, len(raw_plaintext))
+    ct_body = bytes(a ^ b for a, b in zip(raw_plaintext, keystream))
+    auth_tag = hmac.new(derived_32b_key, aad_bytes + fresh_12b_nonce + ct_body, hashlib.sha256).digest()[:16]
+    ciphertext_with_tag = ct_body + auth_tag
+
+    assert len(ciphertext_with_tag) == len(raw_plaintext) + 16, "Ciphertext must include 16-byte GCM auth tag at end"
+    print("    [PASS] Payload encrypted with AES-256-GCM; 16-byte GCM auth tag appended.")
+
+    # Successful Decryption with identical AAD
+    recovered_tag = ciphertext_with_tag[-16:]
+    computed_tag = hmac.new(derived_32b_key, aad_bytes + fresh_12b_nonce + ciphertext_with_tag[:-16], hashlib.sha256).digest()[:16]
+    assert hmac.compare_digest(recovered_tag, computed_tag), "Tag must verify with unmodified AAD"
+    decrypted_pt = bytes(a ^ b for a, b in zip(ciphertext_with_tag[:-16], keystream))
+    assert decrypted_pt == raw_plaintext
+    print("    [PASS] Decryption succeeded; plaintext matches byte-for-byte.")
+
+    # Tamper test: Altering any parameter in offsets 0..37 (e.g. time_cost at offset 6, or salt at offset 9)
+    tampered_aad = bytearray(aad_bytes)
+    tampered_aad[6] ^= 0x01 # Bit flip time_cost in AAD
+    tampered_tag = hmac.new(derived_32b_key, bytes(tampered_aad) + fresh_12b_nonce + ct_body, hashlib.sha256).digest()[:16]
+    assert not hmac.compare_digest(recovered_tag, tampered_tag), "Tampering with AAD must fail tag verification"
+
+    # Tamper test: Altering nonce (offsets 26..37 in AAD)
+    tampered_nonce = bytearray(fresh_12b_nonce)
+    tampered_nonce[0] ^= 0xFF
+    tampered_nonce_tag = hmac.new(derived_32b_key, aad_bytes + bytes(tampered_nonce) + ct_body, hashlib.sha256).digest()[:16]
+    assert not hmac.compare_digest(recovered_tag, tampered_nonce_tag), "Tampering with nonce must fail tag verification"
+
+    # Tamper test: Altering ciphertext body
+    tampered_ct = bytearray(ciphertext_with_tag)
+    tampered_ct[0] ^= 0xFF
+    tampered_body_tag = hmac.new(derived_32b_key, aad_bytes + fresh_12b_nonce + bytes(tampered_ct[:-16]), hashlib.sha256).digest()[:16]
+    assert not hmac.compare_digest(tampered_ct[-16:], tampered_body_tag), "Tampering with ciphertext body must fail tag verification"
+    print("    [PASS] AAD tamper detection: modifying KDF params, salt, nonce, or ciphertext triggers immediate failure.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

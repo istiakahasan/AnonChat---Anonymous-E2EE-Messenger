@@ -139,4 +139,33 @@ final keyBytes = await secretKey.extractBytes();
 // keyBytes is Uint8List(32)
 ```
 
+---
+
+### 5.5 Sub-Step 3.3: Encrypt the Payload with AES-256-GCM
+
+#### Inputs:
+- `plaintext`: Serialized backup payload bytes (containing client identity, ratchet sessions, contacts, and message history).
+- `key`: 32-byte derived key (from Argon2id in Sub-Step 3.2).
+- `nonce`: 12 random bytes, generated fresh for every encryption. **Never** reuse a nonce with the same key.
+- `aad`: The header bytes from offset 0 to 37 (38 bytes total, encompassing magic bytes, version, KDF ID, time cost, memory exponent, parallelism, salt, cipher ID, and nonce). This binds the header parameters to the ciphertext and detects any parameter tampering.
+
+#### Rust Implementation:
+```rust
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+
+let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+let ciphertext = cipher.encrypt(
+    Nonce::from_slice(&nonce),
+    Payload { msg: &plaintext, aad: &header_bytes[0..38] }
+)?;
+// ciphertext includes the 16-byte GCM auth tag at the end
+```
+
+#### Verification & Tamper Resistance:
+- **Header Tampering**: Flipping any bit in offsets 0..37 causes GCM tag verification to fail immediately.
+- **Nonce Integrity**: The 12-byte nonce is embedded in both the header (offsets 26..38) and the GCM IV and authenticated through AAD.
+- **Ciphertext Integrity**: Tampering with any byte of ciphertext or the final 16-byte GCM authentication tag causes decryption to abort with zero plaintext leakage.
+
+
 

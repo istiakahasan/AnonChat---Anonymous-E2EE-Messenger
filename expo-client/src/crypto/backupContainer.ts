@@ -24,6 +24,7 @@ export const BACKUP_HEADER_SIZE = 42;
 export const BACKUP_SALT_SIZE = 16;
 export const BACKUP_NONCE_SIZE = 12;
 export const BACKUP_TAG_SIZE = 16;
+export const BACKUP_AAD_SIZE = 38;
 export const MIN_PASSPHRASE_LEN = 12;
 
 export interface BackupHeader {
@@ -166,13 +167,14 @@ export class BackupContainerService {
     };
 
     const headerBytes = this.serializeHeader(header);
+    const aad = headerBytes.slice(0, BACKUP_AAD_SIZE);
 
-    // Encrypt with Web Crypto AES-GCM passing the full 42-byte header as additionalData (AAD)
+    // Encrypt with Web Crypto AES-GCM passing header bytes 0..37 as additionalData (AAD)
     const ciphertextBuffer = await crypto.subtle.encrypt(
       {
         name: 'AES-GCM',
         iv: nonce,
-        additionalData: headerBytes,
+        additionalData: aad,
         tagLength: 128,
       },
       key,
@@ -211,12 +213,13 @@ export class BackupContainerService {
     }
 
     const ciphertext = containerBytes.slice(BACKUP_HEADER_SIZE, expectedTotal);
+    const aad = headerBytes.slice(0, BACKUP_AAD_SIZE);
 
     const decryptedBuffer = await crypto.subtle.decrypt(
       {
         name: 'AES-GCM',
         iv: header.nonce,
-        additionalData: headerBytes,
+        additionalData: aad,
         tagLength: 128,
       },
       key,
@@ -375,6 +378,7 @@ export class BackupContainerService {
     };
 
     const headerBytes = this.serializeHeader(header);
+    const aad = headerBytes.slice(0, BACKUP_AAD_SIZE);
     const keyBytes = await this.deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism);
     const key = await this.importAesKey(keyBytes);
 
@@ -382,7 +386,7 @@ export class BackupContainerService {
       {
         name: 'AES-GCM',
         iv: nonce,
-        additionalData: headerBytes,
+        additionalData: aad,
         tagLength: 128,
       },
       key,
@@ -416,5 +420,55 @@ export class BackupContainerService {
     const key = await this.importAesKey(keyBytes);
     return this.decryptContainer(key, containerBytes);
   }
+}
+
+/**
+ * Encrypts the serialized backup payload with AES-256-GCM (Sub-Step 3.3).
+ *
+ * Inputs:
+ * - plaintext: serialized backup bytes
+ * - key: CryptoKey (AES-256-GCM)
+ * - nonce: 12 random bytes (fresh for every encryption)
+ * - aad: header bytes from offset 0 to 37 (everything before ciphertext length)
+ */
+export async function encryptPayloadAesGcm(
+  plaintext: Uint8Array,
+  key: CryptoKey,
+  nonce: Uint8Array,
+  aad: Uint8Array
+): Promise<Uint8Array> {
+  const ciphertextBuffer = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: nonce,
+      additionalData: aad,
+      tagLength: 128,
+    },
+    key,
+    plaintext
+  );
+  return new Uint8Array(ciphertextBuffer);
+}
+
+/**
+ * Decrypts the backup payload with AES-256-GCM verifying the AAD.
+ */
+export async function decryptPayloadAesGcm(
+  ciphertext: Uint8Array,
+  key: CryptoKey,
+  nonce: Uint8Array,
+  aad: Uint8Array
+): Promise<Uint8Array> {
+  const decryptedBuffer = await crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: nonce,
+      additionalData: aad,
+      tagLength: 128,
+    },
+    key,
+    ciphertext
+  );
+  return new Uint8Array(decryptedBuffer);
 }
 

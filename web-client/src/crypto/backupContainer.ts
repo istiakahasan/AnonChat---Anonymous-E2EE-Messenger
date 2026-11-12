@@ -24,6 +24,7 @@ export const BACKUP_HEADER_SIZE = 42;
 export const BACKUP_SALT_SIZE = 16;
 export const BACKUP_NONCE_SIZE = 12;
 export const BACKUP_TAG_SIZE = 16;
+export const BACKUP_AAD_SIZE = 38;
 export const MIN_PASSPHRASE_LEN = 12;
 
 export interface BackupHeader {
@@ -236,13 +237,14 @@ export class WebBackupContainerService {
     };
 
     const headerBytes = this.serializeHeader(header);
+    const aad = headerBytes.slice(0, BACKUP_AAD_SIZE);
     const key = await this.deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism);
 
     const ciphertextBuffer = await crypto.subtle.encrypt(
       {
         name: 'AES-GCM',
         iv: nonce,
-        additionalData: headerBytes,
+        additionalData: aad,
         tagLength: 128,
       },
       key,
@@ -279,6 +281,7 @@ export class WebBackupContainerService {
     }
 
     const ciphertext = containerBytes.slice(BACKUP_HEADER_SIZE, expectedTotal);
+    const aad = headerBytes.slice(0, BACKUP_AAD_SIZE);
     const key = await this.deriveBackupKey(
       passphrase,
       header.salt,
@@ -291,7 +294,7 @@ export class WebBackupContainerService {
       {
         name: 'AES-GCM',
         iv: header.nonce,
-        additionalData: headerBytes,
+        additionalData: aad,
         tagLength: 128,
       },
       key,

@@ -25,6 +25,7 @@ public struct BackupContainer {
     public static let saltSize: Int = 16
     public static let nonceSize: Int = 12
     public static let tagSize: Int = 16
+    public static let aadSize: Int = 38
     public static let minPassphraseLength: Int = 12
 
     public struct Header: Equatable {
@@ -175,22 +176,24 @@ public struct BackupContainer {
         )
 
         let headerData = header.toData()
+        let aad = headerData.prefix(BackupContainer.aadSize)
         let symmetricKey = SymmetricKey(data: keyData)
         let nonce = try AES.GCM.Nonce(data: nonceData)
 
-        let sealed = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce, authenticating: headerData)
+        let sealed = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce, authenticating: aad)
         let ciphertext = sealed.ciphertext + sealed.tag
 
         return BackupContainer(header: header, ciphertext: ciphertext)
     }
 
-    /// Decrypts container and authenticates the 42-byte header AAD.
+    /// Decrypts container and authenticates the 38-byte header AAD.
     public func decrypt(keyData: Data) throws -> Data {
         guard ciphertext.count >= BackupContainer.tagSize else {
             throw BackupError.decryptionFailed
         }
 
         let headerData = header.toData()
+        let aad = headerData.prefix(BackupContainer.aadSize)
         let symmetricKey = SymmetricKey(data: keyData)
         let nonce = try AES.GCM.Nonce(data: header.nonce)
 
@@ -198,7 +201,7 @@ public struct BackupContainer {
         let tag = ciphertext.subdata(in: (ciphertext.count - BackupContainer.tagSize)..<ciphertext.count)
 
         let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ctOnly, tag: tag)
-        let plaintext = try AES.GCM.open(sealedBox, using: symmetricKey, authenticating: headerData)
+        let plaintext = try AES.GCM.open(sealedBox, using: symmetricKey, authenticating: aad)
 
         return plaintext
     }
@@ -306,9 +309,10 @@ public struct BackupContainer {
         )
 
         let headerData = header.toData()
+        let aad = headerData.prefix(BackupContainer.aadSize)
         let nonce = try AES.GCM.Nonce(data: nonceData)
 
-        let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce, authenticating: headerData)
+        let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce, authenticating: aad)
         let ciphertext = sealed.ciphertext + sealed.tag
 
         return BackupContainer(header: header, ciphertext: ciphertext)
@@ -329,13 +333,14 @@ public struct BackupContainer {
         }
 
         let headerData = header.toData()
+        let aad = headerData.prefix(BackupContainer.aadSize)
         let nonce = try AES.GCM.Nonce(data: header.nonce)
 
         let ctOnly = ciphertext.subdata(in: 0..<(ciphertext.count - BackupContainer.tagSize))
         let tag = ciphertext.subdata(in: (ciphertext.count - BackupContainer.tagSize)..<ciphertext.count)
 
         let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ctOnly, tag: tag)
-        let plaintext = try AES.GCM.open(sealedBox, using: key, authenticating: headerData)
+        let plaintext = try AES.GCM.open(sealedBox, using: key, authenticating: aad)
 
         return plaintext
     }

@@ -91,5 +91,40 @@ class CryptoUnitTest {
 
         assertEquals("Hello world!", String(recovered, Charsets.UTF_8))
     }
+
+    @Test
+    fun testBackupContainerArgon2idAndPassphraseValidation() {
+        // Validation tests
+        try {
+            BackupContainer.validatePassphrase("short123")
+            fail("Should have failed for short passphrase")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Passphrase too short"))
+        }
+
+        try {
+            BackupContainer.validatePassphrase("aaaaaaaaaaaa")
+            fail("Should have failed for repeating passphrase")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("lacks character diversity"))
+        }
+
+        val strongPassphrase = "Correct-Horse-Battery-2026!"
+        BackupContainer.validatePassphrase(strongPassphrase)
+
+        // Derivation test
+        val salt = ByteArray(16) { 0x55.toByte() }
+        val key = BackupContainer.deriveBackupKey(strongPassphrase, salt, 3.toByte(), 16.toByte(), 1.toByte())
+        assertEquals(32, key.size)
+
+        // Encrypt & decrypt test
+        val sampleData = "{\"contacts\":[\"bob\"],\"messages\":1}".toByteArray(Charsets.UTF_8)
+        val container = BackupContainer.encryptWithPassphrase(strongPassphrase, sampleData, 3.toByte(), 16.toByte(), 1.toByte())
+
+        assertEquals(BackupContainer.HEADER_SIZE + sampleData.size + BackupContainer.TAG_SIZE_BYTES, container.toBytes().size)
+
+        val decrypted = BackupContainer.decryptWithPassphrase(strongPassphrase, container)
+        assertArrayEquals(sampleData, decrypted)
+    }
 }
 
