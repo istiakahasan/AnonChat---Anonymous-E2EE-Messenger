@@ -432,6 +432,29 @@ Before the user can enter a passphrase or generate a recovery code, a full-scree
 - **No Skip or Deferred Prompts**: The interface does not provide a `"Skip"`, `"Later"`, or `"Remind me later"` option.
 - **Ephemeral State (No Memory on Navigation Away)**: If the user navigates away or cancels, the application does not record or persist that the warning was viewed. The screen is presented fresh every time backup generation is initiated.
 
+---
+
+### 5.14 High-Entropy Recovery Codes (BIP39 & Base32)
+
+To eliminate the vulnerability of weak or reused user passphrases (e.g. `"password123"`), AnonChat supports randomly generated high-entropy recovery codes as a first-class alternative to user-chosen passphrases.
+
+#### 1. Security & Cryptographic Invariants
+- **True 256-Bit Entropy**: Generated via cryptographically secure pseudorandom number generators (`CSPRNG`: `ring::rand::SystemRandom`, `crypto.getRandomValues`, `SecureRandom`, `SecRandomCopyBytes`, or `secrets.token_bytes`).
+- **Option B (Recommended): 24-Word BIP39 Mnemonic**:
+  - Entropy length: 256 bits ($ENT = 256$).
+  - Checksum: 8 bits ($CS = ENT / 32 = 8$ bits), derived from the first byte of `SHA-256(entropy)`.
+  - Bit stream: $ENT + CS = 264$ bits.
+  - Word encoding: 264 bits divided into 24 chunks of 11 bits each ($24 \times 11 = 264$), indexing into the standardized 2048-word BIP39 English dictionary.
+  - Error detection: Any corruption, mistyped word, or single bit-flip is detected with 99.6% ($1 - 2^{-8}$) probability.
+- **Option A: Crockford Base32 52-Character Code**:
+  - Entropy length: 256 bits + 4 zero-padding bits = 260 bits.
+  - Base32 encoding: 260 bits divided into 52 5-bit chunks using Crockford's Base32 alphabet (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`).
+  - Formatting: 13 groups of 4 characters separated by spaces (`K7QM 3XPR 9WTF 2BNH ...`).
+  - Ambiguity tolerance & normalization: Strips spaces and hyphens; normalizes `O` $\rightarrow$ `0` and `I`/`L` $\rightarrow$ `1`.
+- **Passphrase Compatibility**: Both formats yield strings substantially exceeding the 12-character minimum passphrase length (`MIN_PASSPHRASE_LEN`) for Argon2id key derivation, maintaining 100% backward and forward compatibility with the 42-byte binary container header without format changes.
+- **Unified Validator**: Accepts either 24 BIP39 English words or a 52-character Crockford Base32 string, restoring the identical 32-byte (256-bit) entropy key.
+
+
 
 
 

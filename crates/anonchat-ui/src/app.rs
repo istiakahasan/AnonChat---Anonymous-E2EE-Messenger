@@ -733,17 +733,36 @@ impl AnonChatApp {
                     ui.label("Cryptographically binds the 42-byte header as AES-256-GCM AAD.");
                     ui.add_space(8.0);
 
-                    ui.label("Passphrase (min 12 characters, strong diversity):");
+                    ui.label("Passphrase or 24-Word Recovery Code:");
                     ui.add(egui::TextEdit::singleline(&mut self.backup_passphrase).password(true));
 
-                    // Show live validation feedback
-                    let validation = validate_passphrase(&self.backup_passphrase);
-                    match &validation {
-                        Ok(()) => {
-                            ui.label(RichText::new("✓ Passphrase meets strength criteria").color(Color32::from_rgb(0, 210, 180)));
+                    ui.horizontal(|ui| {
+                        if ui.button("🎲 Generate 24-Word Recovery Code (BIP39)").clicked() {
+                            self.backup_passphrase = anonchat_crypto::generate_bip39_recovery_code();
                         }
-                        Err(e) => {
-                            ui.label(RichText::new(format!("⚠️ {}", e)).color(Color32::from_rgb(255, 183, 77)));
+                        if ui.button("🔤 Generate Base32 Code (52 Chars)").clicked() {
+                            self.backup_passphrase = anonchat_crypto::generate_base32_recovery_code();
+                        }
+                    });
+
+                    // Show live validation feedback (Recovery Code or Passphrase)
+                    let is_recovery_code = anonchat_crypto::validate_recovery_code(&self.backup_passphrase).is_ok();
+                    let validation = if is_recovery_code {
+                        Ok(())
+                    } else {
+                        validate_passphrase(&self.backup_passphrase)
+                    };
+
+                    if is_recovery_code {
+                        ui.label(RichText::new("✓ High-Entropy Recovery Code verified (256-bit security)").color(Color32::from_rgb(0, 210, 180)));
+                    } else {
+                        match &validation {
+                            Ok(()) => {
+                                ui.label(RichText::new("✓ Passphrase meets strength criteria").color(Color32::from_rgb(0, 210, 180)));
+                            }
+                            Err(e) => {
+                                ui.label(RichText::new(format!("⚠️ {}", e)).color(Color32::from_rgb(255, 183, 77)));
+                            }
                         }
                     }
 

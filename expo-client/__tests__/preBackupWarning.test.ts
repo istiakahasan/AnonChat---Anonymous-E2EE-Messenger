@@ -53,3 +53,4 @@ describe('PreBackupWarningScreen UX & Security Requirements', () => {
     expect(acknowledged).toBe(false);
   });
 });
+

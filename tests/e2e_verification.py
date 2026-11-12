@@ -24,6 +24,8 @@ import hmac
 import time
 import secrets
 import struct
+import re
+from pathlib import Path
 from dataclasses import dataclass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -2341,6 +2343,218 @@ def run_all_tests():
     assert screen.checkbox_checked is False, "Navigating away must NOT remember acknowledgement (ephemeral state)"
     assert screen.can_continue() is False, "Returning to backup must require re-acknowledgement"
     print("    [PASS] Step 3: No bypass permitted (no Skip/Remind later; navigating away resets state).")
+
+    # 21. TASK: HIGH-ENTROPY RECOVERY CODE (BIP39 & CROCKFORD BASE32)
+    print("\n[+] [Recovery Code] Testing High-Entropy Recovery Codes (BIP39 & Base32)...")
+
+    # Load BIP39 2048 English wordlist
+    bip39_path = Path(__file__).resolve().parent.parent / "crates" / "anonchat-crypto" / "src" / "bip39_english.txt"
+    if not bip39_path.exists():
+        bip39_path = Path("crates/anonchat-crypto/src/bip39_english.txt")
+    with open(bip39_path, "r", encoding="utf-8") as f:
+        bip39_wordlist = [line.strip() for line in f if line.strip()]
+    assert len(bip39_wordlist) == 2048, f"BIP39 wordlist must contain 2048 words, got {len(bip39_wordlist)}"
+
+    CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+    def entropy_to_bip39_py(entropy: bytes) -> str:
+        if len(entropy) != 32:
+            raise ValueError(f"Invalid entropy length: expected 32 bytes, got {len(entropy)}")
+        cs = hashlib.sha256(entropy).digest()[0] # 8-bit checksum
+        bits = []
+        for b in entropy:
+            for bit_idx in range(7, -1, -1):
+                bits.append((b >> bit_idx) & 1)
+        for bit_idx in range(7, -1, -1):
+            bits.append((cs >> bit_idx) & 1)
+        words = []
+        for i in range(24):
+            idx = 0
+            for bit_offset in range(11):
+                idx = (idx << 1) | bits[i * 11 + bit_offset]
+            words.append(bip39_wordlist[idx])
+        return " ".join(words)
+
+    def bip39_to_entropy_py(phrase: str) -> bytes:
+        words = phrase.strip().lower().split()
+        if len(words) != 24:
+            raise ValueError(f"Invalid word count: expected 24 words, got {len(words)}")
+        bits = []
+        for i, word in enumerate(words):
+            if word not in bip39_wordlist:
+                raise ValueError(f"Word not found in BIP39 wordlist: '{word}' at position {i + 1}")
+            idx = bip39_wordlist.index(word)
+            for bit_idx in range(10, -1, -1):
+                bits.append((idx >> bit_idx) & 1)
+        entropy = bytearray(32)
+        for byte_idx in range(32):
+            byte = 0
+            for bit_offset in range(8):
+                byte = (byte << 1) | bits[byte_idx * 8 + bit_offset]
+            entropy[byte_idx] = byte
+        expected_cs = 0
+        for bit_offset in range(8):
+            expected_cs = (expected_cs << 1) | bits[256 + bit_offset]
+        entropy_bytes = bytes(entropy)
+        actual_cs = hashlib.sha256(entropy_bytes).digest()[0]
+        if actual_cs != expected_cs:
+            raise ValueError("Invalid BIP39 checksum: phrase may be mistyped or corrupted")
+        return entropy_bytes
+
+    def entropy_to_base32_py(entropy: bytes) -> str:
+        if len(entropy) != 32:
+            raise ValueError(f"Invalid entropy length: expected 32 bytes, got {len(entropy)}")
+        bits = []
+        for b in entropy:
+            for bit_idx in range(7, -1, -1):
+                bits.append((b >> bit_idx) & 1)
+        bits.extend([0, 0, 0, 0]) # 4 trailing padding bits -> 260 bits
+        chars = []
+        for i in range(52):
+            idx = 0
+            for bit_offset in range(5):
+                idx = (idx << 1) | bits[i * 5 + bit_offset]
+            chars.append(CROCKFORD_ALPHABET[idx])
+        groups = ["".join(chars[i:i + 4]) for i in range(0, 52, 4)]
+        return " ".join(groups)
+
+    def base32_to_entropy_py(code: str) -> bytes:
+        norm = re.sub(r"[\s-]+", "", code).upper()
+        norm = norm.replace("O", "0").replace("I", "1").replace("L", "1")
+        if len(norm) != 52:
+            raise ValueError(f"Invalid Base32 length: expected 52 characters, got {len(norm)}")
+        bits = []
+        for c in norm:
+            if c not in CROCKFORD_ALPHABET:
+                raise ValueError(f"Invalid Base32 character: '{c}'")
+            idx = CROCKFORD_ALPHABET.index(c)
+            for bit_idx in range(4, -1, -1):
+                bits.append((idx >> bit_idx) & 1)
+        entropy = bytearray(32)
+        for byte_idx in range(32):
+            byte = 0
+            for bit_offset in range(8):
+                byte = (byte << 1) | bits[byte_idx * 8 + bit_offset]
+            entropy[byte_idx] = byte
+        return bytes(entropy)
+
+    def validate_recovery_code_py(code: str) -> bytes:
+        trimmed = code.strip()
+        words = trimmed.split()
+        if len(words) == 24:
+            return bip39_to_entropy_py(trimmed)
+        stripped = re.sub(r"[\s-]+", "", trimmed)
+        if len(stripped) == 52:
+            return base32_to_entropy_py(trimmed)
+        raise ValueError("Unrecognized recovery code format: must be 24 BIP39 words or 52 Base32 characters")
+
+    # Test 21.1: 256-bit entropy to 24-word BIP39 mnemonic with 8-bit checksum round-trip
+    for _ in range(5):
+        random_entropy = secrets.token_bytes(32)
+        mnemonic = entropy_to_bip39_py(random_entropy)
+        assert len(mnemonic.split()) == 24, "Mnemonic must have exactly 24 words"
+        recovered_entropy = bip39_to_entropy_py(mnemonic)
+        assert recovered_entropy == random_entropy, "BIP39 recovery phrase must round-trip exactly to 32-byte entropy"
+    print("    [PASS] 21.1: 256-bit entropy <-> 24-word BIP39 round-trip with 8-bit SHA-256 checksum.")
+
+    # Test 21.2: BIP39 checksum corruption detection and word validation
+    test_entropy = secrets.token_bytes(32)
+    test_mnemonic = entropy_to_bip39_py(test_entropy)
+    words = test_mnemonic.split()
+
+    # Corrupt last word (affects checksum)
+    corrupted_words = list(words)
+    corrupted_words[-1] = "abandon" if words[-1] != "abandon" else "ability"
+    checksum_failed = False
+    try:
+        bip39_to_entropy_py(" ".join(corrupted_words))
+    except ValueError as e:
+        checksum_failed = True
+        assert "Invalid BIP39 checksum" in str(e)
+    assert checksum_failed is True, "Altering words must fail BIP39 checksum validation"
+
+    # Invalid word not in wordlist
+    invalid_word_list = list(words)
+    invalid_word_list[5] = "notabip39word"
+    invalid_word_failed = False
+    try:
+        bip39_to_entropy_py(" ".join(invalid_word_list))
+    except ValueError as e:
+        invalid_word_failed = True
+        assert "Word not found in BIP39 wordlist" in str(e)
+    assert invalid_word_failed is True, "Unrecognized word must be rejected"
+
+    # Invalid word count
+    count_failed = False
+    try:
+        bip39_to_entropy_py(" ".join(words[:23]))
+    except ValueError as e:
+        count_failed = True
+        assert "expected 24 words" in str(e)
+    assert count_failed is True, "Phrase with != 24 words must be rejected"
+    print("    [PASS] 21.2: Checksum corruption and invalid word detection strictly enforced.")
+
+    # Test 21.3: Crockford Base32 52-character code generation and normalization round-trip
+    for _ in range(5):
+        random_entropy = secrets.token_bytes(32)
+        base32_code = entropy_to_base32_py(random_entropy)
+        groups = base32_code.split(" ")
+        assert len(groups) == 13, f"Expected 13 groups, got {len(groups)}"
+        assert all(len(g) == 4 for g in groups), "Each group must be exactly 4 characters"
+
+        # Round-trip with normalization: lowercase, replaced O->0, I/L->1, extra hyphens/spaces
+        normalized_input = base32_code.lower().replace(" ", "-")
+        recovered_entropy = base32_to_entropy_py(normalized_input)
+        assert recovered_entropy == random_entropy, "Crockford Base32 must round-trip exactly to 32-byte entropy"
+    print("    [PASS] 21.3: Crockford Base32 52-character recovery code generation and normalization (O/I/L).")
+
+    # Test 21.4: Unified recovery code validator
+    random_ent = secrets.token_bytes(32)
+    bip39_code = entropy_to_bip39_py(random_ent)
+    base32_code = entropy_to_base32_py(random_ent)
+
+    val_ent_1 = validate_recovery_code_py(bip39_code)
+    val_ent_2 = validate_recovery_code_py(base32_code)
+    assert val_ent_1 == random_ent
+    assert val_ent_2 == random_ent
+
+    unrecognized_failed = False
+    try:
+        validate_recovery_code_py("invalid code that is neither 24 words nor 52 chars")
+    except ValueError as e:
+        unrecognized_failed = True
+        assert "Unrecognized recovery code format" in str(e)
+    assert unrecognized_failed is True, "Non-standard input formats must be rejected"
+    print("    [PASS] 21.4: Unified validator correctly identifies and parses BIP39 and Base32 recovery codes.")
+
+    # Test 21.5: Backup Container encryption and restoration using a 24-word recovery code
+    recovery_code_phrase = entropy_to_bip39_py(secrets.token_bytes(32))
+    assert len(recovery_code_phrase) >= 12, "Recovery code exceeds minimum 12-char passphrase requirement"
+
+    secret_backup_db = b'{"account": "Alice", "seed": "0xDEADBEEF", "encrypted_messages": 4200}'
+    rc_salt = secrets.token_bytes(16)
+    rc_nonce = secrets.token_bytes(12)
+
+    # Encrypt backup container using the 24-word recovery code as passphrase
+    rc_key = derive_argon2id_key(recovery_code_phrase, rc_salt, 1 << 16, 3, 4)
+    rc_container = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=rc_salt, nonce=rc_nonce)
+    rc_container.encrypt_payload(rc_key, secret_backup_db)
+    rc_container_bytes = rc_container.to_bytes()
+
+    # Restore backup container using restore_backup_container function
+    restored_db = restore_backup_container(rc_container_bytes, recovery_code_phrase)
+    assert restored_db == secret_backup_db, "Backup container restored with 24-word recovery code must match original payload"
+
+    # Restoring with a different recovery code fails authentication
+    wrong_recovery_code = entropy_to_bip39_py(secrets.token_bytes(32))
+    wrong_rc_failed = False
+    try:
+        restore_backup_container(rc_container_bytes, wrong_recovery_code)
+    except ValueError as e:
+        wrong_rc_failed = True
+        assert "Incorrect passphrase or corrupted backup file" in str(e)
+    assert wrong_rc_failed is True, "Restoring with wrong recovery code must fail authentication tag check"
+    print("    [PASS] 21.5: BackupContainer encrypted & restored using 24-word recovery code; wrong code rejected.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

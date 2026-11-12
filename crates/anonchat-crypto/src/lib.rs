@@ -13,6 +13,7 @@ pub mod backup;
 pub mod cipher;
 pub mod identity;
 pub mod ratchet;
+pub mod recovery_code;
 pub mod safety_number;
 pub mod sealed_sender;
 pub mod x3dh;
@@ -25,6 +26,11 @@ pub use backup::{
     DEFAULT_ARGON2_PARALLELISM, DEFAULT_ARGON2_TIME_COST, KDF_ID_ARGON2ID,
     MAX_ALLOWED_MEMORY_EXPONENT, MAX_ALLOWED_PARALLELISM, MAX_ALLOWED_TIME_COST,
     MIN_PASSPHRASE_LEN,
+};
+pub use recovery_code::{
+    base32_to_entropy, bip39_to_entropy, entropy_to_base32, entropy_to_bip39,
+    generate_base32_recovery_code, generate_bip39_recovery_code, generate_entropy_256,
+    validate_recovery_code, RecoveryCodeError, BASE32_CHAR_COUNT, BIP39_WORD_COUNT,
 };
 pub use cipher::{
     decrypt_aes_gcm, encrypt_aes_gcm, pad_message, unpad_message, CipherError,
