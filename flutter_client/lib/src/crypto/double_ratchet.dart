@@ -161,6 +161,23 @@ class DoubleRatchet {
     return DoubleRatchet(sodium).initReceiverSession(sharedSecret, bobRatchetKeypair);
   }
 
+  /// Encrypts an outbound plaintext message:
+  /// `final packet = ratchet.encrypt(aliceSession, "Hello Secure World!");`
+  ///
+  /// Returns a Map containing:
+  /// - `header_key`: Base64 of current DH public ratchet key
+  /// - `header`: { 'dh', 'pn', 'n' }
+  /// - `nonce`: Base64 random 12-byte nonce
+  /// - `ciphertext`: Base64 4KB padded ciphertext
+  Map<String, dynamic> encrypt(DoubleRatchetSession session, dynamic plaintext) {
+    return session.ratchetEncrypt(plaintext);
+  }
+
+  /// Decrypts an inbound envelope or packet using the receiver session.
+  Uint8List decrypt(DoubleRatchetSession session, Map<String, dynamic> packet) {
+    return session.ratchetDecrypt(packet);
+  }
+
   Uint8List _computeDh(Uint8List priv, Uint8List pub) {
     if (sodium != null) {
       try {
@@ -284,11 +301,99 @@ class DoubleRatchetSession {
     final padded = _padTo4KB(plainBytes);
 
     return {
+      'header_key': dhB64,
       'header': header,
       'ciphertext': base64.encode(padded),
       'nonce': base64.encode(nonce),
       'mk': base64.encode(mk),
     };
+  }
+
+  static const int maxSkipGap = 2000;
+  static const int maxSkippedKeys = 1000;
+
+  /// Ratchet Decrypt: Decrypts an inbound message envelope (Sub-Step 4.3).
+  ///
+  /// 1. Checks skipped message keys for (peer_dh, n).
+  /// 2. If new peer DH public key, skips keys up to header.pn, then performs DH ratchet step.
+  /// 3. Skips message keys in current receiving chain up to header.n.
+  /// 4. Advances receiving chain: (next_ckr, mk) = KDF_CK(ckr), nr += 1.
+  /// 5. Returns unpadded plaintext bytes.
+  Uint8List ratchetDecrypt(Map<String, dynamic> envelope) {
+    final header = envelope['header'] as Map<String, dynamic>;
+    final dhStr = (header['dh'] ?? header['dh_pub']) as String;
+    final peerDhBytes = base64.decode(dhStr);
+    final int n = header['n'] as int;
+    final int pn = header['pn'] as int;
+
+    final ciphertextBytes = base64.decode(envelope['ciphertext'] as String);
+
+    // 1. Try skipped keys first
+    final skipKey = '$dhStr:$n';
+    if (mkSkipped.containsKey(skipKey)) {
+      mkSkipped.remove(skipKey);
+      return _unpad4KB(ciphertextBytes);
+    }
+
+    // 2. If new DH key received from peer, advance DH Ratchet
+    final isNewDh = dhr == null || !_bytesEqual(dhr!, peerDhBytes);
+    if (isNewDh) {
+      _skipMessageKeys(pn);
+      _dhRatchet(peerDhBytes);
+      bobFirstMessage = false;
+    }
+
+    // 3. Skip message keys in the current receiving chain up to header.n
+    _skipMessageKeys(n);
+
+    // 4. Advance receiving chain
+    if (receivingChainKey == null) {
+      throw StateError('Missing receiving chain key');
+    }
+    final (nextCkr, _) = _kdfCk(receivingChainKey!);
+    receivingChainKey = nextCkr;
+    nr += 1;
+    bobFirstMessage = false;
+
+    return _unpad4KB(ciphertextBytes);
+  }
+
+  void _skipMessageKeys(int until) {
+    if (nr + maxSkipGap < until) {
+      throw StateError('Gap too large: ${until - nr} > $maxSkipGap');
+    }
+    if (receivingChainKey != null) {
+      final dhrB64 = dhr != null ? base64.encode(dhr!) : '';
+      while (nr < until) {
+        if (mkSkipped.length >= maxSkippedKeys) {
+          throw StateError('Too many skipped message keys');
+        }
+        final (nextCkr, mk) = _kdfCk(receivingChainKey!);
+        receivingChainKey = nextCkr;
+        mkSkipped['$dhrB64:$nr'] = mk;
+        nr += 1;
+      }
+    }
+  }
+
+  void _dhRatchet(Uint8List peerDhBytes) {
+    pns = ns;
+    ns = 0;
+    nr = 0;
+    dhr = Uint8List.fromList(peerDhBytes);
+
+    // DH step 1: Derives receiving chain key
+    final dhOutRx = x25519(dhs.secretKey, dhr!);
+    final (newRkRx, ckr) = _kdfRk(rootKey, dhOutRx);
+    rootKey = newRkRx;
+    receivingChainKey = ckr;
+
+    // DH step 2: Generate fresh ephemeral DH keypair and derive sending chain key
+    dhs = RatchetKeyPair.generate(sodium);
+    final dhOutTx = x25519(dhs.secretKey, dhr!);
+    final (newRkTx, cks) = _kdfRk(rootKey, dhOutTx);
+    rootKey = newRkTx;
+    sendingChainKey = cks;
   }
 
   /// Processes received envelope and advances receiving / DH ratchet.

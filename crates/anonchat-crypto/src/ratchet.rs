@@ -671,3 +671,19 @@ pub fn init_receiver_state<K: IntoReceiverKeypair>(
     RatchetSession::init_receiver_state(shared_secret, bob_ratchet_keypair)
 }
 
+/// Top-level helper function matching libsignal-style API:
+/// `let (header, ciphertext) = encrypt(&mut alice, b"Hello Bob!", b"")?;`
+///
+/// Encrypts an outbound plaintext message under the Double Ratchet session.
+/// Returns the message header struct and the ciphertext (including the 16-byte GCM authentication tag).
+pub fn encrypt(
+    session: &mut RatchetSession,
+    plaintext: &[u8],
+    _aad: &[u8],
+) -> Result<(MessageHeader, Vec<u8>), RatchetError> {
+    let envelope = session.ratchet_encrypt(plaintext)?;
+    let ct_bytes = BASE64.decode(&envelope.ciphertext)?;
+    Ok((envelope.header, ct_bytes))
+}
+
+

@@ -236,3 +236,128 @@ export function fromRatchetState(state: RatchetState): DoubleRatchetSessionState
     bobFirstMessage: state.DHr === null,
   };
 }
+
+export interface RatchetMessageHeader {
+  dh: string;
+  pn: number;
+  n: number;
+}
+
+export interface RatchetEnvelope {
+  header: RatchetMessageHeader;
+  ciphertext: string;
+  nonce: string;
+  mk?: string;
+}
+
+export async function kdfCk(ck: Uint8Array): Promise<{ nextCk: Uint8Array; mk: Uint8Array }> {
+  const hmacKey = await window.crypto.subtle.importKey(
+    'raw',
+    ck,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const mkBuffer = await window.crypto.subtle.sign('HMAC', hmacKey, new Uint8Array([0x01]));
+  const nextCkBuffer = await window.crypto.subtle.sign('HMAC', hmacKey, new Uint8Array([0x02]));
+  return {
+    nextCk: new Uint8Array(nextCkBuffer),
+    mk: new Uint8Array(mkBuffer),
+  };
+}
+
+export async function kdfCK(cks: string | Uint8Array): Promise<[string, Uint8Array]> {
+  const cksBytes = typeof cks === 'string' ? base64ToUint8Array(cks) : cks;
+  const { nextCk, mk } = await kdfCk(cksBytes);
+  return [uint8ArrayToBase64(nextCk), mk];
+}
+
+export function padTo4KB(payload: Uint8Array): Uint8Array {
+  const blockSize = 4096;
+  const minCapacity = 4 + payload.length;
+  const targetSize = Math.ceil(minCapacity / blockSize) * blockSize;
+  const padLen = targetSize - minCapacity;
+
+  const result = new Uint8Array(targetSize);
+  const view = new DataView(result.buffer);
+  view.setUint32(0, payload.length, false);
+  result.set(payload, 4);
+
+  const randomPad = window.crypto.getRandomValues(new Uint8Array(padLen));
+  result.set(randomPad, 4 + payload.length);
+  return result;
+}
+
+export async function aesGcmEncrypt(
+  mk: Uint8Array,
+  nonce: Uint8Array,
+  plaintext: Uint8Array | string,
+  additionalData?: Uint8Array
+): Promise<Uint8Array> {
+  const rawBytes = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : plaintext;
+  const padded = padTo4KB(rawBytes);
+
+  const cryptoKey = await window.crypto.subtle.importKey(
+    'raw',
+    mk,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+
+  const ctBuffer = await window.crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: nonce,
+      additionalData: additionalData || new Uint8Array(0),
+      tagLength: 128,
+    },
+    cryptoKey,
+    padded
+  );
+
+  return new Uint8Array(ctBuffer);
+}
+
+export async function ratchetEncrypt(
+  state: RatchetState,
+  plaintext: Uint8Array | string,
+  performDhRatchet?: (state: RatchetState) => Promise<void>
+): Promise<RatchetEnvelope> {
+  if (!state.CKs) {
+    if (performDhRatchet) {
+      await performDhRatchet(state);
+    } else {
+      if (!state.DHr) {
+        throw new Error('Cannot send message before receiving peer ratchet key');
+      }
+      throw new Error('Missing sending chain key');
+    }
+  }
+
+  // 1. Derive message key
+  const [newCKs, MK] = await kdfCK(state.CKs);
+
+  // 2. Build header
+  const header: RatchetMessageHeader = {
+    dh: state.DHs_pub,
+    pn: state.PNs,
+    n: state.Ns,
+  };
+  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+
+  // 3. Encrypt with AES-GCM
+  const nonce = window.crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await aesGcmEncrypt(MK, nonce, plaintext, headerBytes);
+
+  // 4. Update state
+  state.CKs = newCKs;
+  state.Ns += 1;
+
+  return {
+    header,
+    nonce: uint8ArrayToBase64(nonce),
+    ciphertext: uint8ArrayToBase64(ciphertext),
+    mk: uint8ArrayToBase64(MK),
+  };
+}

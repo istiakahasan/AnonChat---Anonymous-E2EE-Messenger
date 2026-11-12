@@ -402,3 +402,48 @@ export async function ratchetEncrypt(
     mk: uint8ArrayToBase64(mk),
   };
 }
+
+/**
+ * Derives message key and next sending chain key matching:
+ * `const [newCKs, MK] = await kdfCK(state.CKs);`
+ */
+export async function kdfCK(cks: string | Uint8Array): Promise<[string, Uint8Array]> {
+  const cksBytes = typeof cks === 'string' ? base64ToUint8Array(cks) : cks;
+  const { nextCk, mk } = await kdfCk(cksBytes);
+  return [uint8ArrayToBase64(nextCk), mk];
+}
+
+/**
+ * Encrypts plaintext with AES-256-GCM matching:
+ * `const ciphertext = await aesGcmEncrypt(MK, nonce, plaintext, headerBytes);`
+ */
+export async function aesGcmEncrypt(
+  mk: Uint8Array,
+  nonce: Uint8Array,
+  plaintext: Uint8Array | string,
+  additionalData?: Uint8Array
+): Promise<Uint8Array> {
+  const rawBytes = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : plaintext;
+  const padded = padTo4KB(rawBytes);
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    mk,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+
+  const ctBuffer = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: nonce,
+      additionalData: additionalData || new Uint8Array(0),
+      tagLength: 128,
+    },
+    cryptoKey,
+    padded
+  );
+
+  return new Uint8Array(ctBuffer);
+}
