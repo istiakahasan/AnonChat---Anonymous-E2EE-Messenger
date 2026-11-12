@@ -31,7 +31,8 @@ class DoubleRatchetSession private constructor(
     private var receivingChainKey: ByteArray?,
     private var ns: Int = 0,
     private var nr: Int = 0,
-    private var pn: Int = 0
+    private var pn: Int = 0,
+    var bobFirstMessage: Boolean = false
 ) {
     private val secureRandom = SecureRandom()
     private val base64Encoder = Base64.getEncoder()
@@ -42,11 +43,23 @@ class DoubleRatchetSession private constructor(
         const val FIXED_BLOCK_SIZE = 4096
 
         /**
-         * Initializes Alice's ratchet session after X3DH.
+         * Initializes Sender State (Alice, who initiated X3DH).
+         *
+         * Inputs:
+         * - sharedSecret: 32-byte output from X3DH
+         * - bobRatchetPublic: Bob's signed prekey public key (DH ratchet key published by Bob)
+         *
+         * Initialize:
+         * - DHs = fresh X25519 keypair
+         * - DHr = bobRatchetPublic
+         * - RK, CKs = KDF_RK(sharedSecret, DH(DHs_private, DHr))
+         * - CKr = null
+         * - Ns = 0, Nr = 0, PNs = 0, MKSKIPPED = empty map
+         * - BOB_FIRST_MESSAGE = false
          */
-        fun initAlice(
+        fun initSenderState(
             sharedSecret: ByteArray,
-            bobSpkPublic: X25519PublicKeyParameters
+            bobRatchetPublic: X25519PublicKeyParameters
         ): DoubleRatchetSession {
             val secureRandom = SecureRandom()
             val xGen = X25519KeyPairGenerator()
@@ -56,43 +69,74 @@ class DoubleRatchetSession private constructor(
             val dhsPub = pair.public as X25519PublicKeyParameters
 
             val dhOut = ByteArray(32)
-            dhsPriv.generateSecret(bobSpkPublic, dhOut, 0)
+            dhsPriv.generateSecret(bobRatchetPublic, dhOut, 0)
 
             val (newRk, cks) = kdfRk(sharedSecret, dhOut)
 
             return DoubleRatchetSession(
                 dhsPrivate = dhsPriv,
                 dhsPublic = dhsPub,
-                dhrPublic = bobSpkPublic,
+                dhrPublic = bobRatchetPublic,
                 rootKey = newRk,
                 sendingChainKey = cks,
                 receivingChainKey = null,
                 ns = 0,
                 nr = 0,
-                pn = 0
+                pn = 0,
+                bobFirstMessage = false
             )
         }
 
         /**
-         * Initializes Bob's ratchet session after X3DH.
+         * Initializes Alice's ratchet session after X3DH (alias for initSenderState).
+         */
+        fun initAlice(
+            sharedSecret: ByteArray,
+            bobSpkPublic: X25519PublicKeyParameters
+        ): DoubleRatchetSession = initSenderState(sharedSecret, bobSpkPublic)
+
+        /**
+         * Initializes Receiver State (Bob).
+         *
+         * Inputs:
+         * - sharedSecret: same 32 bytes from X3DH
+         * - bobRatchetPrivate, bobRatchetPublic: Bob's signed prekey keypair
+         *
+         * Initialize:
+         * - DHs = bobRatchetKeypair
+         * - DHr = null
+         * - RK = sharedSecret
+         * - CKs = null, CKr = null
+         * - Ns = 0, Nr = 0, PNs = 0, MKSKIPPED = empty map
+         * - BOB_FIRST_MESSAGE = true
+         */
+        fun initReceiverState(
+            sharedSecret: ByteArray,
+            bobRatchetPrivate: X25519PrivateKeyParameters,
+            bobRatchetPublic: X25519PublicKeyParameters
+        ): DoubleRatchetSession {
+            return DoubleRatchetSession(
+                dhsPrivate = bobRatchetPrivate,
+                dhsPublic = bobRatchetPublic,
+                dhrPublic = null,
+                rootKey = sharedSecret.clone(),
+                sendingChainKey = null,
+                receivingChainKey = null,
+                ns = 0,
+                nr = 0,
+                pn = 0,
+                bobFirstMessage = true
+            )
+        }
+
+        /**
+         * Initializes Bob's ratchet session after X3DH (alias for initReceiverState).
          */
         fun initBob(
             sharedSecret: ByteArray,
             bobSpkPrivate: X25519PrivateKeyParameters,
             bobSpkPublic: X25519PublicKeyParameters
-        ): DoubleRatchetSession {
-            return DoubleRatchetSession(
-                dhsPrivate = bobSpkPrivate,
-                dhsPublic = bobSpkPublic,
-                dhrPublic = null,
-                rootKey = sharedSecret,
-                sendingChainKey = null,
-                receivingChainKey = null,
-                ns = 0,
-                nr = 0,
-                pn = 0
-            )
-        }
+        ): DoubleRatchetSession = initReceiverState(sharedSecret, bobSpkPrivate, bobSpkPublic)
 
         private fun kdfRk(rk: ByteArray, dhOut: ByteArray): Pair<ByteArray, ByteArray> {
             val hkdf = HKDFBytesGenerator(SHA256Digest())
@@ -207,6 +251,7 @@ class DoubleRatchetSession private constructor(
         if (isNewDh) {
             skipMessageKeys(envelope.header.pn)
             dhRatchet(peerDhPublic)
+            bobFirstMessage = false
         }
 
         skipMessageKeys(envelope.header.n)
@@ -215,6 +260,7 @@ class DoubleRatchetSession private constructor(
         val (nextCkr, mk) = kdfCk(currentCkr)
         receivingChainKey = nextCkr
         nr += 1
+        bobFirstMessage = false
 
         val ciphertext = base64Decoder.decode(envelope.ciphertext)
         val nonce = base64Decoder.decode(envelope.nonce)

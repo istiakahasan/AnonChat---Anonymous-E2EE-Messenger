@@ -133,6 +133,36 @@ Anon_Chat/
   - Desktop: `crates/anonchat-ui/src/app.rs`, `crates/anonchat-ui/src/qr.rs`, `crates/anonchat-ui/src/main.rs`
   - Android: `android/app/src/main/java/org/anonchat/ui/Screens.kt`
 
+### Task 7: Safety Numbers & Identity Key-Change Lockdown
+- **60-Digit Safety Number**: Derived deterministically across lexicographically ordered identity keys using 5,200 iterations of SHA-512 formatted into 12 groups of 5 decimal digits.
+- **Key-Change Detection**: Every incoming message / session update verifies the sender's identity key against `lastRemoteKey`.
+- **Lockdown Behavior**:
+  1. Sets `verifiedAt = null` in secure local storage.
+  2. Inserts a persistent, non-dismissable security alert warning of potential MITM interception.
+  3. Disables message input field and blocks outbound message transmission until the user either completes verification again or explicitly accepts the new key with an unverified acknowledgment.
+- **Code Locations**:
+  - Rust: `crates/anonchat-crypto/src/safety_numbers.rs`, `crates/anonchat-ui/src/app.rs`
+  - Multi-platform: `expo-client/src/crypto/safetyNumbers.ts`, `flutter_client/lib/src/crypto/safety_numbers.dart`
+
+### Task 8: Self-Describing Backup Container & Blind Server Upload
+- **42-Byte Binary Header**:
+  - Magic bytes: `"ANON"` (`0x41 0x4E 0x4F 0x4E`)
+  - Version: `0x01`
+  - KDF ID: `0x01` (Argon2id)
+  - Argon2 Parameters: Time cost (iterations), memory exponent (`memory_kib = 1 << exponent`), parallelism, 16-byte fresh salt.
+  - Cipher ID: `0x01` (AES-256-GCM), 12-byte fresh nonce, 4-byte little-endian ciphertext length.
+- **Resource Exhaustion Defense**:
+  - Strict parameter ceilings enforced before derivation: `memory_exponent <= 20` (1 GiB), `time_cost <= 10`, `parallelism <= 4`.
+- **Authenticated Encryption**:
+  - AES-256-GCM with AAD binding the 38-byte header (`offset 0..37`) to ciphertext with uniform error reporting for wrong passphrase or tampering.
+- **Blind Server Storage (`POST /v1/backup`)**:
+  - Opaque blob storage up to 100 MB (`413 Payload Too Large` enforcement), authenticated by public key hash / blinded token.
+  - Replaces previous backups on conflict (single latest backup).
+  - Client confirmation invariant: displays informational text without misleading success checkmarks (`✓`/`✔`).
+- **Code Locations**:
+  - Rust: `crates/anonchat-crypto/src/backup.rs`, `crates/anonchat-server/src/routes.rs`, `crates/anonchat-server/src/storage.rs`
+  - Multi-platform: `expo-client/src/crypto/backupContainer.ts`, `web-client/src/crypto/backupContainer.ts`, `flutter_client/lib/src/crypto/backup_container.dart`, `android/app/src/main/java/org/anonchat/crypto/BackupContainer.kt`, `ios/AnonChat/Crypto/BackupContainer.swift`
+
 ---
 
 ## Verification & Testing

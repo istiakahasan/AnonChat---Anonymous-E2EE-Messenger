@@ -35,8 +35,8 @@ pub use identity::{
     SerializedIdentityState, SerializedOneTimePreKey, DEFAULT_ONE_TIME_PREKEYS_COUNT,
 };
 pub use ratchet::{
-    EncryptedEnvelope, MessageHeader, RatchetError, RatchetSession, SerializedRatchetSession,
-    SerializedSkippedKey,
+    init_receiver_state, init_sender_state, EncryptedEnvelope, IntoReceiverKeypair, MessageHeader,
+    RatchetError, RatchetKeyPair, RatchetSession, SerializedRatchetSession, SerializedSkippedKey,
 };
 pub use safety_number::{
     compute_individual_fingerprint, derive_safety_number, ContactVerificationState,

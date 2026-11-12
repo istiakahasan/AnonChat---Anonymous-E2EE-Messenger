@@ -44,39 +44,102 @@ public class DoubleRatchetSession {
     private var nr: UInt32 = 0
     private var pn: UInt32 = 0
     private var skippedKeys: [String: SymmetricKey] = [:]
+    public var bobFirstMessage: Bool = false
 
     public init(
         dhsPrivate: Curve25519.KeyAgreement.PrivateKey,
         dhsPublic: Curve25519.KeyAgreement.PublicKey,
         dhrPublic: Curve25519.KeyAgreement.PublicKey?,
         rootKey: SymmetricKey,
-        sendingChainKey: SymmetricKey? = nil
+        sendingChainKey: SymmetricKey? = nil,
+        receivingChainKey: SymmetricKey? = nil,
+        bobFirstMessage: Bool = false
     ) {
         self.dhsPrivate = dhsPrivate
         self.dhsPublic = dhsPublic
         self.dhrPublic = dhrPublic
         self.rootKey = rootKey
         self.sendingChainKey = sendingChainKey
+        self.receivingChainKey = receivingChainKey
+        self.bobFirstMessage = bobFirstMessage
     }
 
-    /// Alice ratchet session initialization after X3DH
-    public static func initAlice(
+    /// Alice ratchet session initialization after X3DH (Sender State)
+    ///
+    /// Inputs:
+    /// - sharedSecret: 32-byte output from X3DH
+    /// - bobRatchetPublic: Bob's signed prekey public key (DH ratchet key published by Bob)
+    ///
+    /// Initialize:
+    /// - DHs = fresh X25519 keypair
+    /// - DHr = bobRatchetPublic
+    /// - RK, CKs = KDF_RK(sharedSecret, DH(DHs_private, DHr))
+    /// - CKr = nil
+    /// - Ns = 0, Nr = 0, PNs = 0, MKSKIPPED = empty
+    /// - BOB_FIRST_MESSAGE = false
+    public static func initSenderState(
         sharedSecret: SymmetricKey,
-        bobSpkPublic: Curve25519.KeyAgreement.PublicKey
+        bobRatchetPublic: Curve25519.KeyAgreement.PublicKey
     ) throws -> DoubleRatchetSession {
         let dhsPriv = Curve25519.KeyAgreement.PrivateKey()
         let dhsPub = dhsPriv.publicKey
 
-        let dhOut = try dhsPriv.sharedSecretFromKeyAgreement(with: bobSpkPublic)
+        let dhOut = try dhsPriv.sharedSecretFromKeyAgreement(with: bobRatchetPublic)
         let (newRk, cks) = kdfRk(rk: sharedSecret, dhOut: dhOut)
 
         return DoubleRatchetSession(
             dhsPrivate: dhsPriv,
             dhsPublic: dhsPub,
-            dhrPublic: bobSpkPublic,
+            dhrPublic: bobRatchetPublic,
             rootKey: newRk,
-            sendingChainKey: cks
+            sendingChainKey: cks,
+            receivingChainKey: nil,
+            bobFirstMessage: false
         )
+    }
+
+    /// Alice ratchet session initialization after X3DH (alias for initSenderState)
+    public static func initAlice(
+        sharedSecret: SymmetricKey,
+        bobSpkPublic: Curve25519.KeyAgreement.PublicKey
+    ) throws -> DoubleRatchetSession {
+        return try initSenderState(sharedSecret: sharedSecret, bobRatchetPublic: bobSpkPublic)
+    }
+
+    /// Bob ratchet session initialization after X3DH (Receiver State)
+    ///
+    /// Inputs:
+    /// - sharedSecret: same 32 bytes from X3DH
+    /// - bobRatchetKeypair: Bob's signed prekey private key
+    ///
+    /// Initialize:
+    /// - DHs = bobRatchetKeypair
+    /// - DHr = nil
+    /// - RK = sharedSecret
+    /// - CKs = nil, CKr = nil
+    /// - Ns = 0, Nr = 0, PNs = 0, MKSKIPPED = empty
+    /// - BOB_FIRST_MESSAGE = true
+    public static func initReceiverState(
+        sharedSecret: SymmetricKey,
+        bobRatchetKeypair: Curve25519.KeyAgreement.PrivateKey
+    ) -> DoubleRatchetSession {
+        return DoubleRatchetSession(
+            dhsPrivate: bobRatchetKeypair,
+            dhsPublic: bobRatchetKeypair.publicKey,
+            dhrPublic: nil,
+            rootKey: sharedSecret,
+            sendingChainKey: nil,
+            receivingChainKey: nil,
+            bobFirstMessage: true
+        )
+    }
+
+    /// Bob ratchet session initialization after X3DH (alias for initReceiverState)
+    public static func initBob(
+        sharedSecret: SymmetricKey,
+        bobSpkKeypair: Curve25519.KeyAgreement.PrivateKey
+    ) -> DoubleRatchetSession {
+        return initReceiverState(sharedSecret: sharedSecret, bobRatchetKeypair: bobSpkKeypair)
     }
 
     /// Encrypts an outbound plaintext message:
