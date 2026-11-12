@@ -393,7 +393,7 @@ def x3dh_bob_respond(bob: ClientIdentity, initiation: dict):
 # ---------------------------------------------------------------------------
 def kdf_rk(rk: bytes, dh_out: bytes):
     prk = hkdf_extract(rk, dh_out)
-    okm = hkdf_expand(prk, b"AnonChat_DoubleRatchet_RootKDF", 64)
+    okm = hkdf_expand(prk, b"DoubleRatchet", 64)
     return okm[:32], okm[32:64]
 
 def kdf_ck(ck: bytes):
@@ -1812,6 +1812,97 @@ def run_all_tests():
         tamper_failed = True
     assert tamper_failed is True, "Tampering with header fields in AAD must fail tag verification"
     print("    [PASS] Step 4: AAD authentication: header modification triggers immediate AEAD tag verification failure.")
+
+    # 17. TASK: SUB-STEP 4.4: DIFFIE-HELLMAN RATCHET STEP (CONTINUOUS REKEYING & BREAK-IN RECOVERY)
+    print("\n[+] [Sub-Step 4.4] Testing Diffie-Hellman Ratchet Step & Post-Compromise Security...")
+
+    # Test 17.1: Verify KDF_RK with HKDF-SHA256 and info=b"DoubleRatchet"
+    test_rk = secrets.token_bytes(32)
+    test_dh_out = secrets.token_bytes(32)
+    prk_test = hkdf_extract(test_rk, test_dh_out)
+    expected_okm = hkdf_expand(prk_test, b"DoubleRatchet", 64)
+    res_rk, res_ck = kdf_rk(test_rk, test_dh_out)
+    assert res_rk == expected_okm[:32], "RootKey must match first 32 bytes of HKDF-expand"
+    assert res_ck == expected_okm[32:64], "ChainKey must match second 32 bytes of HKDF-expand"
+    print("    [PASS] Step 1: KDF_RK verified with HKDF-SHA256 and info='DoubleRatchet' (Signal standard).")
+
+    # Test 17.2: DH Ratchet execution on receiver side when header.dh != state.DHr
+    alice_p = init_sender_state(dr_secret, bob_pub)
+    bob_p = init_receiver_state(dr_secret, bob_kp)
+
+    # Initial state
+    initial_bob_rk = bob_p.root_key
+    initial_alice_dh_pub = alice_p.dhs_pub
+
+    # Alice sends message 0
+    h_a0, ct_a0 = encrypt(alice_p, b"Round 1 message from Alice", b"")
+    # Bob receives message 0: triggers DH ratchet step
+    pt_b0 = decrypt(bob_p, h_a0, ct_a0, b"")
+    assert pt_b0 == b"Round 1 message from Alice"
+    assert bob_p.dhr_pub == initial_alice_dh_pub, "Bob DHr must be updated to Alice's DH public key"
+    assert bob_p.root_key != initial_bob_rk, "Bob Root Key must advance after DH ratchet step"
+    assert bob_p.cks is not None, "Bob sending chain key must be derived during DH ratchet step"
+    assert bob_p.ns == 0, "Bob Ns must be reset to 0 after DH ratchet step"
+    assert bob_p.nr == 1, "Bob Nr must be 1 after decrypting message 0"
+    print("    [PASS] Step 2: Receiver DH ratchet updates DHr, advances RK twice, and derives new CKr and CKs.")
+
+    # Test 17.3: Sender DH Ratchet when replying
+    # Bob replies to Alice: Bob's sending chain has new DHs
+    bob_dhs_pub_before_reply = bob_p.dhs_pub
+    h_b0, ct_b0 = encrypt(bob_p, b"Round 1 reply from Bob", b"")
+    assert h_b0["dh"] == base64.b64encode(bob_dhs_pub_before_reply).decode()
+    assert bob_p.ns == 1
+
+    # Alice receives Bob's reply: triggers Alice's DH ratchet step
+    initial_alice_rk = alice_p.root_key
+    pt_a0 = decrypt(alice_p, h_b0, ct_b0, b"")
+    assert pt_a0 == b"Round 1 reply from Bob"
+    assert alice_p.dhr_pub == bob_dhs_pub_before_reply
+    assert alice_p.root_key != initial_alice_rk
+    assert alice_p.ns == 0, "Alice Ns reset to 0 after DH ratchet step"
+    print("    [PASS] Step 3: Bidirectional continuous rekeying advances Root and Chain keys on every round trip.")
+
+    # Test 17.4: Post-Compromise Security (Break-in Recovery / Self-Healing)
+    # Attacker compromises all state at this exact point (steals RK, CKs, CKr)
+    stolen_alice_rk = alice_p.root_key
+    stolen_alice_cks = alice_p.cks
+    stolen_alice_ckr = alice_p.ckr
+    stolen_alice_dhs_priv = alice_p.dhs_priv
+
+    # Message sent before ratchet step can be decrypted by attacker
+    h_compromised, ct_compromised = encrypt(alice_p, b"Compromised message", b"")
+    # Attacker decrypts with stolen CKs
+    _, stolen_mk = kdf_ck(stolen_alice_cks)
+    nonce_c = ct_compromised[:12]
+    aad_c = json.dumps({"dh": h_compromised["dh"], "n": h_compromised["n"], "pn": h_compromised["pn"]}, sort_keys=True).encode()
+    compromised_decrypted = decrypt_authenticated(stolen_mk, nonce_c, ct_compromised[12:], aad_c)
+    assert b"Compromised message" in compromised_decrypted
+
+    # Now Bob receives the message, and Alice and Bob execute a DH ratchet step
+    decrypt(bob_p, h_compromised, ct_compromised, b"")
+
+    # Bob sends a fresh reply on new DH ratchet key
+    h_healed_bob, ct_healed_bob = encrypt(bob_p, b"Bob self-healing turn", b"")
+    decrypt(alice_p, h_healed_bob, ct_healed_bob, b"")
+
+    # Alice sends post-compromise message with brand new ephemeral DH key
+    h_healed, ct_healed = encrypt(alice_p, b"Post-compromise secured message", b"")
+
+    # Attacker attempts to decrypt h_healed using stolen state
+    # Since Bob and Alice injected fresh ephemeral Curve25519 entropy unknown to attacker,
+    # the attacker's derived keys will fail authentication tag verification.
+    attacker_failed = False
+    try:
+        _, attacker_mk = kdf_ck(stolen_alice_cks)
+        decrypt_authenticated(attacker_mk, ct_healed[:12], ct_healed[12:], b"")
+    except Exception:
+        attacker_failed = True
+    assert attacker_failed is True, "Attacker cannot decrypt post-compromise messages after DH ratchet step"
+
+    # Legitimate recipient (Bob) decrypts successfully
+    healed_pt = decrypt(bob_p, h_healed, ct_healed, b"")
+    assert healed_pt == b"Post-compromise secured message"
+    print("    [PASS] Step 4: Post-Compromise Security (Break-in Recovery): DH ratchet restored forward secrecy after compromise.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

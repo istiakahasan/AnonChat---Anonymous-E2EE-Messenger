@@ -173,8 +173,19 @@ class DoubleRatchet {
     return session.ratchetEncrypt(plaintext);
   }
 
-  /// Decrypts an inbound envelope or packet using the receiver session.
-  Uint8List decrypt(DoubleRatchetSession session, Map<String, dynamic> packet) {
+  /// Decrypts an inbound envelope or packet using the receiver session:
+  /// `final message = ratchet.decrypt(bobSession, packet);`
+  dynamic decrypt(DoubleRatchetSession session, Map<String, dynamic> packet) {
+    final bytes = session.ratchetDecrypt(packet);
+    try {
+      return utf8.decode(bytes);
+    } catch (_) {
+      return bytes;
+    }
+  }
+
+  /// Decrypts an inbound envelope or packet returning raw bytes.
+  Uint8List decryptBytes(DoubleRatchetSession session, Map<String, dynamic> packet) {
     return session.ratchetDecrypt(packet);
   }
 
@@ -532,7 +543,7 @@ Uint8List _hkdfExpand(List<int> prk, List<int> info, int length) {
 
 (Uint8List, Uint8List) _kdfRk(Uint8List rk, Uint8List dhOut) {
   final prk = _hkdfExtract(rk, dhOut);
-  final okm = _hkdfExpand(prk, utf8.encode('AnonChat_DoubleRatchet_RootKDF'), 64);
+  final okm = _hkdfExpand(prk, utf8.encode('DoubleRatchet'), 64);
   return (
     Uint8List.fromList(okm.sublist(0, 32)),
     Uint8List.fromList(okm.sublist(32, 64)),

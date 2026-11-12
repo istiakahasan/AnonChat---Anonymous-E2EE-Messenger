@@ -462,8 +462,8 @@ impl RatchetSession {
         res
     }
 
-    /// Advances the DH ratchet upon receiving a new DH public key from the peer.
-    fn dh_ratchet(&mut self, peer_dh_public: &X25519PublicKey) -> Result<(), RatchetError> {
+    /// Advances the DH ratchet upon receiving a new DH public key from the peer (Sub-Step 4.4).
+    pub fn dh_ratchet(&mut self, peer_dh_public: &X25519PublicKey) -> Result<(), RatchetError> {
         self.pn = self.ns;
         self.ns = 0;
         self.nr = 0;
@@ -542,12 +542,12 @@ impl<T> OptionExt<T> for Option<T> {
     }
 }
 
-/// KDF_RK: Derives a new Root Key and Chain Key from Root Key and DH output.
-/// Uses HKDF-SHA256 with info constants.
+/// KDF_RK: Derives a new Root Key and Chain Key from Root Key and DH output (Sub-Step 4.4).
+/// Uses HKDF-SHA256 with info="DoubleRatchet".
 fn kdf_rk(rk: [u8; 32], dh_out: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     let hk = Hkdf::<Sha256>::new(Some(&rk), dh_out);
     let mut okm = [0u8; 64];
-    hk.expand(b"AnonChat_DoubleRatchet_RootKDF", &mut okm)
+    hk.expand(b"DoubleRatchet", &mut okm)
         .expect("HKDF expand must succeed with 64 byte output");
 
     let mut next_rk = [0u8; 32];

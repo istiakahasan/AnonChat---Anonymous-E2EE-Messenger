@@ -486,3 +486,65 @@ export async function ratchetDecrypt(
   mk.fill(0);
   return unpad4KB(new Uint8Array(ptBuffer));
 }
+
+export async function kdfRk(rk: Uint8Array, dhOut: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
+  const hmacKey = await window.crypto.subtle.importKey(
+    'raw',
+    rk,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const prkBuffer = await window.crypto.subtle.sign('HMAC', hmacKey, dhOut);
+  const prkKey = await window.crypto.subtle.importKey(
+    'raw',
+    prkBuffer,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const info = new TextEncoder().encode('DoubleRatchet');
+  const t1Input = new Uint8Array(info.length + 1);
+  t1Input.set(info, 0);
+  t1Input[info.length] = 0x01;
+  const t1 = new Uint8Array(await window.crypto.subtle.sign('HMAC', prkKey, t1Input));
+
+  const t2Input = new Uint8Array(t1.length + info.length + 1);
+  t2Input.set(t1, 0);
+  t2Input.set(info, t1.length);
+  t2Input[t1.length + info.length] = 0x02;
+  const t2 = new Uint8Array(await window.crypto.subtle.sign('HMAC', prkKey, t2Input));
+
+  return [t1, t2];
+}
+
+export async function dhRatchet(
+  state: RatchetState,
+  peerDhPub: string,
+  computeDh?: (priv: Uint8Array, pub: Uint8Array) => Promise<Uint8Array>,
+  generateKeyPair?: () => Promise<RatchetKeyPair>
+): Promise<void> {
+  state.PNs = state.Ns;
+  state.Ns = 0;
+  state.Nr = 0;
+  state.DHr = peerDhPub;
+
+  if (computeDh && generateKeyPair) {
+    const peerDhBytes = base64ToUint8Array(peerDhPub);
+    const rkBytes = base64ToUint8Array(state.RK);
+
+    const dhOutRx = await computeDh(base64ToUint8Array(state.DHs_priv), peerDhBytes);
+    const [newRkRx, ckr] = await kdfRk(rkBytes, dhOutRx);
+    state.CKr = uint8ArrayToBase64(ckr);
+
+    const newDhs = await generateKeyPair();
+    state.DHs_priv = uint8ArrayToBase64(newDhs.privateKey);
+    state.DHs_pub = uint8ArrayToBase64(newDhs.publicKey);
+
+    const dhOutTx = await computeDh(newDhs.privateKey, peerDhBytes);
+    const [newRkTx, cks] = await kdfRk(newRkRx, dhOutTx);
+    state.RK = uint8ArrayToBase64(newRkTx);
+    state.CKs = uint8ArrayToBase64(cks);
+  }
+}

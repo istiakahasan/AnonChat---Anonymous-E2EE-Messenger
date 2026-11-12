@@ -331,6 +331,43 @@ Inputs: `(header, nonce, ciphertext)`
 #### Critical Defense: `MAX_SKIP = 100` DoS Mitigation:
 An adversary could send an envelope with $N = 1,000,000$ to trigger a million costly KDF computations and allocate memory for a million message keys. AnonChat enforces `MAX_SKIP = 100` at the gate: if the gap between $N_r$ and the requested message number exceeds 100, the packet is rejected with a `GapTooLarge` error before entering the derivation loop.
 
+### 5.11 Sub-Step 4.4: Diffie-Hellman Ratchet Step (Continuous Rekeying & Post-Compromise Security)
+
+#### When It Runs:
+- **Receiver Side**: Triggered inside `ratchet_decrypt` whenever `header.dh != state.DHr` (the peer has ratcheted their DH key).
+- **Sender Side**: Triggered inside `ratchet_encrypt` when sending chain key `CKs` is null and peer's DH key `DHr` is known.
+
+#### Algorithm (Receiver Side):
+1. Save previous sending chain length: $\text{state.PNs} \leftarrow \text{state.Ns}$.
+2. Reset message counter for new sending chain: $\text{state.Ns} \leftarrow 0$.
+3. Reset message counter for new receiving chain: $\text{state.Nr} \leftarrow 0$.
+4. Update peer's DH ratchet public key: $\text{state.DHr} \leftarrow \text{header.dh}$.
+5. **Derive New Receiving Chain Key**:
+   $$DH_{\text{rx}} = X25519(\text{state.DHs\_private}, \text{state.DHr})$$
+   $$(\text{state.RK}, \text{state.CKr}) = \text{KDF\_RK}(\text{state.RK}, DH_{\text{rx}})$$
+6. **Generate Fresh Ephemeral Keypair**:
+   $$DH_{\text{s\_new}} = \text{generate\_X25519\_keypair}()$$
+   $$\text{state.DHs} \leftarrow DH_{\text{s\_new}}$$
+7. **Derive New Sending Chain Key**:
+   $$DH_{\text{tx}} = X25519(\text{state.DHs\_new\_private}, \text{state.DHr})$$
+   $$(\text{state.RK}, \text{state.CKs}) = \text{KDF\_RK}(\text{state.RK}, DH_{\text{tx}})$$
+
+#### Algorithm (Sender Side, when initiating after receiving):
+- Generate new X25519 keypair $DH_{\text{s\_new}}$.
+- Compute $DH_{\text{tx}} = X25519(DH_{\text{s\_new\_private}}, \text{state.DHr})$.
+- Derive $(\text{state.RK}, \text{state.CKs}) = \text{KDF\_RK}(\text{state.RK}, DH_{\text{tx}})$.
+- Overwrite old private keys and zeroize intermediate buffers.
+
+#### Post-Compromise Security (Break-in Recovery):
+Even if an active attacker seizes physical device RAM and extracts current session keys $(RK, CK_s, CK_r)$, security self-heals after a single round-trip ratchet exchange. The newly generated Curve25519 private keys inject fresh entropy inaccessible to the adversary, re-establishing end-to-end forward secrecy and confidentiality.
+
+#### KDF_RK Specification (Signal Protocol Standard):
+$$\text{PRK} = \text{HMAC-SHA256}(\text{salt} = \text{RK}, \text{ikm} = DH_{\text{output}})$$
+$$\text{Output}_{64} = \text{HKDF-Expand}(\text{PRK}, \text{info} = \texttt{"DoubleRatchet"}, \text{len} = 64)$$
+$$\text{RootKey} = \text{Output}[0..32]$$
+$$\text{ChainKey} = \text{Output}[32..64]$$
+
+
 
 
 
