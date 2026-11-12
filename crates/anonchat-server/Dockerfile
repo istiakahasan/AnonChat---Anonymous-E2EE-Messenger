@@ -11,8 +11,8 @@ COPY crates/anonchat-client/ ./crates/anonchat-client/
 COPY crates/anonchat-ui/ ./crates/anonchat-ui/
 
 # Build optimized release binary
-WORKDIR /usr/src/anonchat/crates/anonchat-server
-RUN cargo build --release --bin anonchat-server
+WORKDIR /usr/src/anonchat
+RUN cargo build --package anonchat-server --release --bin anonchat-server
 
 # Final minimal runtime image
 FROM debian:bullseye-slim

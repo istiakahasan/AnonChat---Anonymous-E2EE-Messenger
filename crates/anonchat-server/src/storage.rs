@@ -299,13 +299,13 @@ impl RelayStorage for PostgresRelayStorage {
     async fn get_prekey_bundle_and_pop_opk(&self, user_id: &str) -> Result<Option<PreKeyBundle>> {
         let mut tx = self.pool.begin().await?;
 
-        let user_row = sqlx::query!(
+        let user_row = sqlx::query(
             r#"
             SELECT identity_key, identity_dh_key, signed_prekey_id, signed_prekey, signed_prekey_signature
             FROM users WHERE user_id = $1
             "#,
-            user_id
         )
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -315,7 +315,7 @@ impl RelayStorage for PostgresRelayStorage {
         };
 
         // Atomically select and delete ONE One-Time PreKey (FOR UPDATE SKIP LOCKED)
-        let opk_row = sqlx::query!(
+        let opk_row = sqlx::query(
             r#"
             DELETE FROM one_time_prekeys
             WHERE (user_id, opk_id) = (
@@ -326,43 +326,44 @@ impl RelayStorage for PostgresRelayStorage {
             )
             RETURNING opk_id, opk_key;
             "#,
-            user_id
         )
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?;
 
         tx.commit().await?;
 
+        use sqlx::Row;
         let opk_list = match opk_row {
             Some(row) => vec![PublicOneTimePreKey {
-                id: row.opk_id as u32,
-                key: row.opk_key,
+                id: row.get::<i32, _>("opk_id") as u32,
+                key: row.get::<String, _>("opk_key"),
             }],
             None => Vec::new(),
         };
 
         Ok(Some(PreKeyBundle {
             user_id: user_id.to_string(),
-            identity_key: user.identity_key,
-            identity_dh_key: user.identity_dh_key,
-            signed_prekey_id: user.signed_prekey_id as u32,
-            signed_prekey: user.signed_prekey,
-            signed_prekey_signature: user.signed_prekey_signature,
+            identity_key: user.get::<String, _>("identity_key"),
+            identity_dh_key: user.get::<String, _>("identity_dh_key"),
+            signed_prekey_id: user.get::<i32, _>("signed_prekey_id") as u32,
+            signed_prekey: user.get::<String, _>("signed_prekey"),
+            signed_prekey_signature: user.get::<String, _>("signed_prekey_signature"),
             one_time_prekeys: opk_list,
         }))
     }
 
     async fn enqueue_message(&self, recipient_id: &str, blob: Vec<u8>) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO messages (id, recipient_id, blob, timestamp)
             VALUES ($1, $2, $3, NOW());
             "#,
-            id,
-            recipient_id,
-            blob
         )
+        .bind(id)
+        .bind(recipient_id)
+        .bind(blob)
         .execute(&self.pool)
         .await?;
 
@@ -371,24 +372,25 @@ impl RelayStorage for PostgresRelayStorage {
 
     async fn drain_messages(&self, user_id: &str) -> Result<Vec<QueuedMessage>> {
         // Atomically fetch and delete all messages in a single query
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             DELETE FROM messages
             WHERE recipient_id = $1
             RETURNING id, recipient_id, blob, timestamp;
             "#,
-            user_id
         )
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 
+        use sqlx::Row;
         let messages = rows
             .into_iter()
             .map(|row| QueuedMessage {
-                id: row.id,
-                recipient_id: row.recipient_id,
-                blob: row.blob,
-                timestamp: row.timestamp,
+                id: row.get::<Uuid, _>("id"),
+                recipient_id: row.get::<String, _>("recipient_id"),
+                blob: row.get::<Vec<u8>, _>("blob"),
+                timestamp: row.get::<chrono::DateTime<chrono::Utc>, _>("timestamp"),
             })
             .collect();
 

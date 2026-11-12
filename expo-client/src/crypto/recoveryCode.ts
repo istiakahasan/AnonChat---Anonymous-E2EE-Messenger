@@ -196,6 +196,13 @@ export function generateBase32RecoveryCode(): string {
 }
 
 /**
+ * Validates a BIP39 24-word recovery code (recovering 32-byte entropy).
+ */
+export async function validateBip39RecoveryCode(phrase: string): Promise<Uint8Array> {
+  return bip39ToEntropy(phrase);
+}
+
+/**
  * Validates any recovery code (BIP39 24 words or Base32 52 characters).
  */
 export async function validateRecoveryCode(input: string): Promise<Uint8Array> {
