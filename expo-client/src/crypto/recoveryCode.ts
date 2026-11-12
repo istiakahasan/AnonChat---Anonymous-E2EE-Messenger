@@ -213,3 +213,4 @@ export async function validateRecoveryCode(input: string): Promise<Uint8Array> {
 
   throw new Error('Unrecognized recovery code format: must be 24 BIP39 words or 52 Base32 characters');
 }
+

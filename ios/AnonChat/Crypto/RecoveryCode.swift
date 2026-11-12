@@ -235,3 +235,4 @@ public struct RecoveryCode {
         throw RecoveryCodeError.unrecognizedFormat
     }
 }
+

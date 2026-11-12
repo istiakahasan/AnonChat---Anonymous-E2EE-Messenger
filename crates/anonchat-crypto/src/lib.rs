@@ -19,13 +19,13 @@ pub mod sealed_sender;
 pub mod x3dh;
 
 pub use backup::{
-    decrypt_payload, derive_backup_key, derive_key_from_header, encrypt_payload,
-    validate_passphrase, BackupContainer, BackupContainerError, BackupHeader, BACKUP_AAD_SIZE,
-    BACKUP_HEADER_SIZE, BACKUP_MAGIC, BACKUP_NONCE_SIZE, BACKUP_SALT_SIZE, BACKUP_TAG_SIZE,
-    BACKUP_VERSION_1, CIPHER_ID_AES_256_GCM, DEFAULT_ARGON2_MEMORY_EXPONENT,
-    DEFAULT_ARGON2_PARALLELISM, DEFAULT_ARGON2_TIME_COST, KDF_ID_ARGON2ID,
-    MAX_ALLOWED_MEMORY_EXPONENT, MAX_ALLOWED_PARALLELISM, MAX_ALLOWED_TIME_COST,
-    MIN_PASSPHRASE_LEN,
+    decrypt_payload, derive_backup_key, derive_backup_key_from_recovery_code,
+    derive_key_from_header, encrypt_payload, validate_passphrase, BackupContainer,
+    BackupContainerError, BackupHeader, BACKUP_AAD_SIZE, BACKUP_HEADER_SIZE, BACKUP_MAGIC,
+    BACKUP_NONCE_SIZE, BACKUP_SALT_SIZE, BACKUP_TAG_SIZE, BACKUP_VERSION_1,
+    CIPHER_ID_AES_256_GCM, DEFAULT_ARGON2_MEMORY_EXPONENT, DEFAULT_ARGON2_PARALLELISM,
+    DEFAULT_ARGON2_TIME_COST, KDF_ID_ARGON2ID, MAX_ALLOWED_MEMORY_EXPONENT,
+    MAX_ALLOWED_PARALLELISM, MAX_ALLOWED_TIME_COST, MIN_PASSPHRASE_LEN,
 };
 pub use recovery_code::{
     base32_to_entropy, bip39_to_entropy, entropy_to_base32, entropy_to_bip39,

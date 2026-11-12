@@ -304,3 +304,4 @@ mod tests {
         assert!(validate_recovery_code("too short").is_err());
     }
 }
+

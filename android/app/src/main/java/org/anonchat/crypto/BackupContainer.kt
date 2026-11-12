@@ -244,11 +244,15 @@ object BackupContainer {
 
     /**
      * Enforces passphrase policy:
-     * - Minimum 12 characters.
-     * - Rejects repeating or sequential patterns.
-     * - Requires multiple character categories.
+     * - High-entropy recovery codes (24 BIP39 words or 52 Base32 chars) automatically pass (256-bit entropy).
+     * - Custom passphrases: minimum 12 characters, character diversity, and monotonic sequence rejection.
      */
     fun validatePassphrase(passphrase: String) {
+        try {
+            RecoveryCode.validateRecoveryCode(passphrase)
+            return // High-entropy recovery code (256-bit entropy)
+        } catch (_: Exception) {}
+
         if (passphrase.length < MIN_PASSPHRASE_LEN) {
             throw IllegalArgumentException("Passphrase too short: minimum $MIN_PASSPHRASE_LEN characters required (got ${passphrase.length})")
         }
@@ -327,6 +331,21 @@ object BackupContainer {
             val skf = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
             skf.generateSecret(spec).encoded
         }
+    }
+
+    /**
+     * Derives a 256-bit (32-byte) key directly from a high-entropy recovery code:
+     * key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+     */
+    fun deriveKeyFromRecoveryCode(
+        recoveryCode: String,
+        salt: ByteArray,
+        timeCost: Byte = 3,
+        memoryExponent: Byte = 16,
+        parallelism: Byte = 4
+    ): ByteArray {
+        RecoveryCode.validateRecoveryCode(recoveryCode)
+        return deriveBackupKey(recoveryCode, salt, timeCost, memoryExponent, parallelism)
     }
 
     /**

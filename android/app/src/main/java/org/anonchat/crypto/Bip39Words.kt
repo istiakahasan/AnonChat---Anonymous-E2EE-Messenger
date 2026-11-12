@@ -209,3 +209,4 @@ object Bip39Words {
         "yellow", "you", "young", "youth", "zebra", "zero", "zone", "zoo"
     )
 }
+

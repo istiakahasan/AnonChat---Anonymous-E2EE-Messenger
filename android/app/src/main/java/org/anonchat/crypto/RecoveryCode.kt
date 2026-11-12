@@ -207,3 +207,4 @@ object RecoveryCode {
         throw IllegalArgumentException("Unrecognized recovery code format: must be 24 BIP39 words or 52 Base32 characters")
     }
 }
+

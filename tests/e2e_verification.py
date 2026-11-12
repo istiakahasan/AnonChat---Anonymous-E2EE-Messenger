@@ -2556,6 +2556,47 @@ def run_all_tests():
     assert wrong_rc_failed is True, "Restoring with wrong recovery code must fail authentication tag check"
     print("    [PASS] 21.5: BackupContainer encrypted & restored using 24-word recovery code; wrong code rejected.")
 
+    # Test 21.6: Explicit verification of key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+    bip39_rc = entropy_to_bip39_py(secrets.token_bytes(32))
+    base32_rc = entropy_to_base32_py(secrets.token_bytes(32))
+    test_salt = secrets.token_bytes(16)
+    memory_kib = 65536 # 1 << 16 (64 MiB)
+    time_cost = 3
+    parallelism = 4
+
+    # Derive keys via key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+    key_bip39 = derive_argon2id_key(bip39_rc, test_salt, memory_kib, time_cost, parallelism)
+    key_bip39_dup = derive_argon2id_key(bip39_rc, test_salt, memory_kib, time_cost, parallelism)
+    key_base32 = derive_argon2id_key(base32_rc, test_salt, memory_kib, time_cost, parallelism)
+
+    # 1. Output key length is strictly 32 bytes (256 bits)
+    assert len(key_bip39) == 32, f"Expected 32-byte key, got {len(key_bip39)}"
+    assert len(key_base32) == 32, f"Expected 32-byte key, got {len(key_base32)}"
+
+    # 2. Key derivation is strictly deterministic
+    assert key_bip39 == key_bip39_dup, "Identical inputs must produce identical 256-bit keys"
+    assert key_bip39 != key_base32, "Distinct recovery codes must produce distinct keys"
+
+    # 3. Salt independence
+    alt_salt = secrets.token_bytes(16)
+    key_alt_salt = derive_argon2id_key(bip39_rc, alt_salt, memory_kib, time_cost, parallelism)
+    assert key_bip39 != key_alt_salt, "Different salt must produce different 256-bit key"
+
+    # 4. Parameter sensitivity (memory, iterations, parallelism)
+    key_diff_mem = derive_argon2id_key(bip39_rc, test_salt, 32768, time_cost, parallelism)
+    key_diff_time = derive_argon2id_key(bip39_rc, test_salt, memory_kib, 4, parallelism)
+    key_diff_lanes = derive_argon2id_key(bip39_rc, test_salt, memory_kib, time_cost, 2)
+    assert key_bip39 != key_diff_mem, "Altering memory must produce different key"
+    assert key_bip39 != key_diff_time, "Altering iterations must produce different key"
+    assert key_bip39 != key_diff_lanes, "Altering parallelism must produce different key"
+
+    # 5. Full round-trip container encryption with Base32 recovery code key
+    rc32_container = BackupContainerTest(time_cost=time_cost, memory_exponent=16, parallelism=parallelism, salt=test_salt, nonce=secrets.token_bytes(12))
+    rc32_container.encrypt_payload(key_base32, secret_backup_db)
+    restored_from_base32 = restore_backup_container(rc32_container.to_bytes(), base32_rc)
+    assert restored_from_base32 == secret_backup_db, "Backup container restored via Base32 recovery code must match original payload"
+    print("    [PASS] 21.6: key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32) verified across all invariants.")
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")

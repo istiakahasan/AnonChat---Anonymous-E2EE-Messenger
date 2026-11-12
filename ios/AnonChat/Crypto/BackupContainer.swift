@@ -231,10 +231,13 @@ public struct BackupContainer {
     }
 
     /// Enforces strong passphrase policies before key derivation:
-    /// - Minimum 12 characters.
-    /// - Rejects repeating or sequential patterns.
-    /// - Requires character diversity.
+    /// - High-entropy recovery codes (24 BIP39 words or 52 Base32 chars) automatically pass (256-bit entropy).
+    /// - Custom passphrases: minimum 12 characters, character diversity, and monotonic sequence rejection.
     public static func validatePassphrase(_ passphrase: String) throws {
+        if (try? RecoveryCode.validateRecoveryCode(input: passphrase)) != nil {
+            return // High-entropy recovery code (256-bit entropy)
+        }
+
         guard passphrase.count >= minPassphraseLength else {
             throw BackupError.passphraseTooShort(passphrase.count)
         }
@@ -294,6 +297,25 @@ public struct BackupContainer {
             outputByteCount: 32
         )
         return derivedKey
+    }
+
+    /// Derives a 256-bit (32-byte) key directly from a high-entropy recovery code:
+    /// key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+    public static func deriveKeyFromRecoveryCode(
+        recoveryCode: String,
+        salt: Data,
+        timeCost: UInt8 = 3,
+        memoryExponent: UInt8 = 16,
+        parallelism: UInt8 = 4
+    ) throws -> SymmetricKey {
+        _ = try RecoveryCode.validateRecoveryCode(input: recoveryCode)
+        return try deriveBackupKey(
+            passphrase: recoveryCode,
+            salt: salt,
+            timeCost: timeCost,
+            memoryExponent: memoryExponent,
+            parallelism: parallelism
+        )
     }
 
     /// Encrypts container with user passphrase.

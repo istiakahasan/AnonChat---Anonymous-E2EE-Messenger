@@ -69,3 +69,4 @@ describe('High-Entropy Recovery Code Specification (BIP39 & Base32)', () => {
     await expect(validateRecoveryCode('too short')).rejects.toThrow(/Unrecognized recovery code format/);
   });
 });
+

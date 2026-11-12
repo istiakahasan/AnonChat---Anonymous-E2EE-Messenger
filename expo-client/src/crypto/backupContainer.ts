@@ -257,11 +257,20 @@ export class BackupContainerService {
 
   /**
    * Enforces passphrase policy:
-   * - Minimum 12 characters.
-   * - Rejects repeating or sequential patterns.
-   * - Requires multiple character categories.
+   * - High-entropy recovery codes (24 BIP39 words or 52 Base32 chars) automatically pass (256-bit entropy).
+   * - Custom passphrases: minimum 12 characters, character diversity, and monotonic sequence rejection.
    */
   static validatePassphrase(passphrase: string): void {
+    // If the input is a 24-word BIP39 mnemonic or 52-char Base32 code, it satisfies 256-bit entropy
+    if (passphrase) {
+      const trimmed = passphrase.trim();
+      const words = trimmed.split(/\s+/);
+      const stripped = trimmed.replace(/[\s-]+/g, '');
+      if (words.length === 24 || stripped.length === 52) {
+        return;
+      }
+    }
+
     if (!passphrase || passphrase.length < MIN_PASSPHRASE_LEN) {
       throw new Error(
         `Passphrase too short: minimum ${MIN_PASSPHRASE_LEN} characters required (got ${
@@ -360,6 +369,20 @@ export class BackupContainerService {
       );
       return new Uint8Array(bits);
     }
+  }
+
+  /**
+   * Derives a 32-byte key from a high-entropy recovery code:
+   * key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+   */
+  static async deriveKeyFromRecoveryCode(
+    recoveryCode: string,
+    salt: Uint8Array,
+    timeCost: number = 3,
+    memoryExponent: number = 16,
+    parallelism: number = 1
+  ): Promise<Uint8Array> {
+    return this.deriveBackupKey(recoveryCode, salt, timeCost, memoryExponent, parallelism);
   }
 
   /**

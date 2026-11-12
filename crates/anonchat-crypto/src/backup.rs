@@ -300,11 +300,17 @@ impl BackupHeader {
 }
 
 /// Enforces strong passphrase policies before key derivation:
-/// - Minimum 12 characters.
+/// - High-entropy recovery codes (24 BIP39 words or 52 Base32 chars) automatically pass (256-bit entropy).
+/// - For custom passphrases: minimum 12 characters.
 /// - Rejects identical repeating characters (e.g. "aaaaaaaaaaaa").
 /// - Rejects simple monotonic digit or letter sequences.
 /// - Requires at least 5 unique characters and diversity across character classes.
 pub fn validate_passphrase(passphrase: &str) -> Result<(), BackupContainerError> {
+    // If the input is a valid high-entropy recovery code, it satisfies 256-bit security immediately
+    if crate::recovery_code::validate_recovery_code(passphrase).is_ok() {
+        return Ok(());
+    }
+
     if passphrase.len() < MIN_PASSPHRASE_LEN {
         return Err(BackupContainerError::PassphraseTooShort(passphrase.len()));
     }
@@ -414,6 +420,20 @@ pub fn derive_backup_key(
         .map_err(|e| BackupContainerError::KdfError(e.to_string()))?;
 
     Ok(key)
+}
+
+/// Derives a 256-bit (32-byte) key directly from a high-entropy recovery code:
+/// `key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)`
+pub fn derive_backup_key_from_recovery_code(
+    recovery_code: &str,
+    salt: &[u8],
+    m_cost_kib: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<Zeroizing<[u8; 32]>, BackupContainerError> {
+    crate::recovery_code::validate_recovery_code(recovery_code)
+        .map_err(|e| BackupContainerError::WeakPassphrase(e.to_string()))?;
+    derive_backup_key(recovery_code, salt, m_cost_kib, t_cost, p_cost)
 }
 
 /// Helper to derive a 256-bit key directly from a `BackupHeader`.

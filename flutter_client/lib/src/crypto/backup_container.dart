@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import 'recovery_code.dart';
 
 /// AnonChat Self-Describing Backup Container Format (Flutter / Dart)
 ///
@@ -35,10 +36,17 @@ const int maxAllowedTimeCost = 10;
 const int maxAllowedParallelism = 4;
 
 /// Enforces passphrase policy before key derivation:
-/// - Minimum 12 characters
-/// - Rejects weak repetitive or monotonic sequential strings
-/// - Requires character diversity
+/// - Automatically recognizes and validates high-entropy recovery codes (24 BIP39 words or 52 Base32 characters).
+/// - For custom passphrases: minimum 12 characters, character diversity, and monotonic pattern rejection.
 void validatePassphrase(String passphrase) {
+  // If the input is a valid high-entropy recovery code, it satisfies 256-bit security immediately
+  try {
+    RecoveryCode.validate(passphrase);
+    return;
+  } catch (_) {
+    // Fall through to custom passphrase policy validation
+  }
+
   if (passphrase.length < minPassphraseLen) {
     throw FormatException(
       'Passphrase too short: minimum $minPassphraseLen characters required (got ${passphrase.length})',
@@ -72,10 +80,13 @@ void validatePassphrase(String passphrase) {
   }
 }
 
-/// Derives a 256-bit (32-byte) key from the user's passphrase using Argon2id via package:cryptography.
+/// Derives a 256-bit (32-byte) key from the user's passphrase or recovery code using Argon2id via package:cryptography.
+///
+/// Formula:
+/// key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
 ///
 /// Inputs:
-/// - passphrase: string, UTF-8 encoded
+/// - passphrase / recoveryCode: string, UTF-8 encoded
 /// - salt: 16 random bytes (fresh per backup)
 /// - timeCost: iterations (e.g. 3)
 /// - memoryExponent: memory_kib = 1 << memoryExponent (e.g. 16 -> 65536 KiB)
@@ -112,6 +123,27 @@ Future<Uint8List> deriveBackupKey(
 
   final keyBytes = await secretKey.extractBytes();
   return Uint8List.fromList(keyBytes);
+}
+
+/// Derives a 256-bit (32-byte) key directly from a high-entropy recovery code:
+/// key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+Future<Uint8List> deriveKeyFromRecoveryCode(
+  String recoveryCode,
+  Uint8List salt, {
+  int timeCost = 3,
+  int memoryExponent = 16,
+  int parallelism = 1,
+  int hashLength = 32,
+}) async {
+  RecoveryCode.validate(recoveryCode);
+  return deriveBackupKey(
+    recoveryCode,
+    salt,
+    timeCost: timeCost,
+    memoryExponent: memoryExponent,
+    parallelism: parallelism,
+    hashLength: hashLength,
+  );
 }
 
 class BackupHeader {

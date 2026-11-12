@@ -454,6 +454,25 @@ To eliminate the vulnerability of weak or reused user passphrases (e.g. `"passwo
 - **Passphrase Compatibility**: Both formats yield strings substantially exceeding the 12-character minimum passphrase length (`MIN_PASSPHRASE_LEN`) for Argon2id key derivation, maintaining 100% backward and forward compatibility with the 42-byte binary container header without format changes.
 - **Unified Validator**: Accepts either 24 BIP39 English words or a 52-character Crockford Base32 string, restoring the identical 32-byte (256-bit) entropy key.
 
+#### 2. Key Derivation Formula
+```text
+key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
+```
+
+- **Parameters**:
+  - `recoveryCode`: String, UTF-8 encoded (e.g. 24 BIP39 words separated by spaces, or 52 Crockford Base32 characters).
+  - `salt`: 16 cryptographically random bytes stored in the container header at offset `9..25`.
+  - `memory`: Memory cost in KiB ($1 \ll \text{memory\_exponent}$, default $65,536\text{ KiB} = 64\text{ MiB}$).
+  - `iterations`: Time cost (default 3 iterations).
+  - `parallelism`: Parallel lanes (default 4 lanes on desktop/Android, 1 lane in single-threaded environments).
+  - `32`: Desired derived key length in bytes (256-bit symmetric key for AES-256-GCM).
+
+- **Architectural Rationale**:
+  1. **Unified Pipeline**: A single, uniform decryption path handles both user-chosen passphrases and randomly generated recovery codes. No format flag or container modification is required.
+  2. **Domain Separation & Salt Independence**: A fresh 16-byte random salt per backup guarantees that multiple backups generated with the same recovery code produce completely independent symmetric keys.
+  3. **Defense-in-Depth**: Memory-hard Argon2id execution ensures maximum resistance against physical extraction and offline attacks.
+
+
 
 
 
