@@ -121,4 +121,22 @@ const key = await argon2id({
 // key is a Uint8Array(32)
 ```
 
+#### Flutter / Dart Native Implementation (`package:cryptography`):
+```dart
+import 'package:cryptography/cryptography.dart';
+
+final algorithm = Argon2id(
+  memory: 65536,
+  iterations: 3,
+  parallelism: 1,
+  hashLength: 32,
+);
+final secretKey = await algorithm.deriveKey(
+  secretKey: SecretKey(utf8.encode(passphrase)),
+  nonce: salt, // 16 bytes
+);
+final keyBytes = await secretKey.extractBytes();
+// keyBytes is Uint8List(32)
+```
+
 

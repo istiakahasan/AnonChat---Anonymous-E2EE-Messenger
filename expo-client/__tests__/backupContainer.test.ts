@@ -73,3 +73,4 @@ describe('BackupContainerService (Expo / React Native)', () => {
     expect(new TextDecoder().decode(decrypted)).toBe('{"contacts":["bob"],"messages":42}');
   });
 });
+

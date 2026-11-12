@@ -11,6 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   libsignal: ^2.3.0
+  cryptography: ^2.7.0
   flutter_secure_storage: ^9.0.0
   qr_flutter: ^4.1.0
   mobile_scanner: ^5.1.0

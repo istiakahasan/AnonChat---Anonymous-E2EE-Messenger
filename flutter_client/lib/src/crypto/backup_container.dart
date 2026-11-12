@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:typed_data';
+import 'package:cryptography/cryptography.dart';
 
 /// AnonChat Self-Describing Backup Container Format (Flutter / Dart)
 ///
@@ -64,22 +66,24 @@ void validatePassphrase(String passphrase) {
   }
 }
 
-/// Derives a 256-bit key from the user's passphrase using Argon2id parameters.
+/// Derives a 256-bit (32-byte) key from the user's passphrase using Argon2id via package:cryptography.
+///
 /// Inputs:
-/// - passphrase: string
+/// - passphrase: string, UTF-8 encoded
 /// - salt: 16 random bytes (fresh per backup)
-/// - memoryKib: 1 << memoryExponent
-/// - timeCost: iterations
-/// - parallelism: lanes
+/// - timeCost: iterations (e.g. 3)
+/// - memoryExponent: memory_kib = 1 << memoryExponent (e.g. 16 -> 65536 KiB)
+/// - parallelism: lanes (e.g. 1)
 /// Output:
-/// - 32-byte key
-Uint8List deriveBackupKey(
+/// - 32-byte key (Uint8List)
+Future<Uint8List> deriveBackupKey(
   String passphrase,
-  Uint8List salt,
-  int timeCost,
-  int memoryExponent,
-  int parallelism,
-) {
+  Uint8List salt, {
+  int timeCost = 3,
+  int memoryExponent = 16,
+  int parallelism = 1,
+  int hashLength = 32,
+}) async {
   validatePassphrase(passphrase);
 
   if (salt.length < backupSaltSize) {
@@ -88,15 +92,20 @@ Uint8List deriveBackupKey(
 
   final memoryKib = 1 << memoryExponent;
 
-  // In production Flutter apps, dargon2_flutter / native Argon2id bindings are invoked:
-  // e.g. DArgon2Flutter.hashPasswordBytes(passphraseBytes, salt: salt, iterations: timeCost, memory: memoryKib, parallelism: parallelism, length: 32, type: Argon2Type.id)
-  final key = Uint8List(32);
-  // Mock deterministic key material derivation for local execution
-  final passBytes = passphrase.codeUnits;
-  for (var i = 0; i < 32; i++) {
-    key[i] = (passBytes[i % passBytes.length] ^ salt[i % backupSaltSize] ^ (memoryKib & 0xFF) ^ timeCost ^ parallelism) & 0xFF;
-  }
-  return key;
+  final algorithm = Argon2id(
+    memory: memoryKib,
+    iterations: timeCost,
+    parallelism: parallelism,
+    hashLength: hashLength,
+  );
+
+  final secretKey = await algorithm.deriveKey(
+    secretKey: SecretKey(utf8.encode(passphrase)),
+    nonce: salt.sublist(0, backupSaltSize),
+  );
+
+  final keyBytes = await secretKey.extractBytes();
+  return Uint8List.fromList(keyBytes);
 }
 
 class BackupHeader {
@@ -244,21 +253,32 @@ class BackupContainer {
     return BackupContainer(header: header, ciphertext: ciphertext);
   }
 
-  /// High-level container creation with user passphrase
-  static BackupContainer createWithPassphrase(
+  /// High-level container creation with user passphrase using Argon2id and AES-256-GCM.
+  static Future<BackupContainer> createWithPassphrase(
     String passphrase,
     Uint8List plaintext, {
     int timeCost = 3,
     int memoryExponent = 16,
-    int parallelism = 4,
+    int parallelism = 1,
     Uint8List? freshSalt,
     Uint8List? freshNonce,
-  }) {
+  }) async {
     validatePassphrase(passphrase);
-    final salt = freshSalt ?? Uint8List(backupSaltSize);
-    final nonce = freshNonce ?? Uint8List(backupNonceSize);
+    final salt = freshSalt ??
+        Uint8List.fromList(List<int>.generate(
+            backupSaltSize, (_) => (DateTime.now().microsecondsSinceEpoch >> 3) & 0xFF));
+    final nonce = freshNonce ??
+        Uint8List.fromList(List<int>.generate(
+            backupNonceSize, (_) => (DateTime.now().microsecondsSinceEpoch >> 5) & 0xFF));
 
-    final key = deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism);
+    final keyBytes = await deriveBackupKey(
+      passphrase,
+      salt,
+      timeCost: timeCost,
+      memoryExponent: memoryExponent,
+      parallelism: parallelism,
+    );
+
     final header = BackupHeader(
       magic: Uint8List.fromList(backupMagic),
       version: backupVersion1,
@@ -272,40 +292,56 @@ class BackupContainer {
       ciphertextLen: plaintext.length + backupTagSize,
     );
 
-    // Encrypt plaintext with key and header AAD
-    final ct = Uint8List(plaintext.length + backupTagSize);
-    for (var i = 0; i < plaintext.length; i++) {
-      ct[i] = plaintext[i] ^ key[i % key.length];
-    }
-    // Tag
-    for (var i = 0; i < backupTagSize; i++) {
-      ct[plaintext.length + i] = 0xAA ^ key[i];
-    }
+    final headerBytes = header.toBytes();
+    final aesGcm = AesGcm.with256Bits();
+    final secretBox = await aesGcm.encrypt(
+      plaintext,
+      secretKey: SecretKey(keyBytes),
+      nonce: nonce,
+      aad: headerBytes,
+    );
 
-    return BackupContainer(header: header, ciphertext: ct);
+    final ciphertext = Uint8List(secretBox.cipherText.length + secretBox.mac.bytes.length);
+    ciphertext.setRange(0, secretBox.cipherText.length, secretBox.cipherText);
+    ciphertext.setRange(secretBox.cipherText.length, ciphertext.length, secretBox.mac.bytes);
+
+    return BackupContainer(header: header, ciphertext: ciphertext);
   }
 
-  /// High-level container decryption with user passphrase
-  Uint8List decryptWithPassphrase(String passphrase) {
+  /// High-level container decryption with user passphrase verifying 42-byte header AAD.
+  Future<Uint8List> decryptWithPassphrase(String passphrase) async {
     validatePassphrase(passphrase);
-    final key = deriveBackupKey(
+    final keyBytes = await deriveBackupKey(
       passphrase,
       header.salt,
-      header.timeCost,
-      header.memoryExponent,
-      header.parallelism,
+      timeCost: header.timeCost,
+      memoryExponent: header.memoryExponent,
+      parallelism: header.parallelism,
     );
 
     if (ciphertext.length < backupTagSize) {
       throw const FormatException('Ciphertext too short');
     }
 
+    final headerBytes = header.toBytes();
     final ptLen = ciphertext.length - backupTagSize;
-    final pt = Uint8List(ptLen);
-    for (var i = 0; i < ptLen; i++) {
-      pt[i] = ciphertext[i] ^ key[i % key.length];
-    }
-    return pt;
+    final cipherOnly = ciphertext.sublist(0, ptLen);
+    final macBytes = ciphertext.sublist(ptLen);
+
+    final aesGcm = AesGcm.with256Bits();
+    final secretBox = SecretBox(
+      cipherOnly,
+      nonce: header.nonce,
+      mac: Mac(macBytes),
+    );
+
+    final decrypted = await aesGcm.decrypt(
+      secretBox,
+      secretKey: SecretKey(keyBytes),
+      aad: headerBytes,
+    );
+
+    return Uint8List.fromList(decrypted);
   }
 }
 
