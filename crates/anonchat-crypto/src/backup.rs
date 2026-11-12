@@ -72,6 +72,13 @@ pub const DEFAULT_ARGON2_TIME_COST: u8 = 3;
 pub const DEFAULT_ARGON2_MEMORY_EXPONENT: u8 = 16;
 pub const DEFAULT_ARGON2_PARALLELISM: u8 = 4;
 
+/// Resource Exhaustion Defense Ceilings (Sub-Step 3.4):
+/// Prevents a malicious backup header specifying exorbitant Argon2 parameters
+/// from causing a Denial-of-Service / Out-Of-Memory condition on the device.
+pub const MAX_ALLOWED_MEMORY_EXPONENT: u8 = 20; // 1 << 20 KiB = 1,048,576 KiB = 1 GiB
+pub const MAX_ALLOWED_TIME_COST: u8 = 10;
+pub const MAX_ALLOWED_PARALLELISM: u8 = 4;
+
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum BackupContainerError {
     #[error("Header too short: expected at least 42 bytes, got {0}")]
@@ -88,12 +95,18 @@ pub enum BackupContainerError {
     PayloadTruncated { declared: usize, actual: usize },
     #[error("Ciphertext too short: must be at least 16 bytes for GCM auth tag, got {0}")]
     CiphertextTooShort(usize),
-    #[error("Decryption failed: integrity check or authentication tag verification failed")]
+    #[error("Incorrect passphrase or corrupted backup file.")]
     DecryptionFailed,
     #[error("Encryption failed")]
     EncryptionFailed,
     #[error("Argon2 memory exponent too large: 1 << {0} exceeds 64-bit address space")]
     MemoryExponentTooLarge(u8),
+    #[error("Argon2 parameter exceeds security ceiling: memory_exponent {0} > {MAX_ALLOWED_MEMORY_EXPONENT} (resource exhaustion defense)")]
+    MemoryExponentExceedsCeiling(u8),
+    #[error("Argon2 parameter exceeds security ceiling: time_cost {0} > {MAX_ALLOWED_TIME_COST} (resource exhaustion defense)")]
+    TimeCostExceedsCeiling(u8),
+    #[error("Argon2 parameter exceeds security ceiling: parallelism {0} > {MAX_ALLOWED_PARALLELISM} (resource exhaustion defense)")]
+    ParallelismExceedsCeiling(u8),
     #[error("Passphrase too short: minimum {MIN_PASSPHRASE_LEN} characters required, got {0}")]
     PassphraseTooShort(usize),
     #[error("Passphrase is too weak: {0}")]
@@ -172,6 +185,28 @@ impl BackupHeader {
         Ok(1u64 << self.memory_exponent)
     }
 
+    /// Resource Exhaustion Defense:
+    /// Enforces maximum ceilings on KDF parameters before derivation:
+    /// - Reject memory_exponent > 20 (1 GiB)
+    /// - Reject time_cost > 10
+    /// - Reject parallelism > 4
+    pub fn validate_resource_limits(&self) -> Result<(), BackupContainerError> {
+        if self.memory_exponent > MAX_ALLOWED_MEMORY_EXPONENT {
+            return Err(BackupContainerError::MemoryExponentExceedsCeiling(
+                self.memory_exponent,
+            ));
+        }
+        if self.time_cost > MAX_ALLOWED_TIME_COST {
+            return Err(BackupContainerError::TimeCostExceedsCeiling(self.time_cost));
+        }
+        if self.parallelism > MAX_ALLOWED_PARALLELISM {
+            return Err(BackupContainerError::ParallelismExceedsCeiling(
+                self.parallelism,
+            ));
+        }
+        Ok(())
+    }
+
     /// Serializes the header into its exact 42-byte little-endian binary representation.
     pub fn to_bytes(&self) -> [u8; BACKUP_HEADER_SIZE] {
         let mut bytes = [0u8; BACKUP_HEADER_SIZE];
@@ -244,7 +279,7 @@ impl BackupHeader {
 
         let ciphertext_len = u32::from_le_bytes([bytes[38], bytes[39], bytes[40], bytes[41]]);
 
-        Ok(Self {
+        let header = Self {
             magic,
             version,
             kdf_id,
@@ -255,7 +290,12 @@ impl BackupHeader {
             cipher_id,
             nonce,
             ciphertext_len,
-        })
+        };
+
+        // Resource exhaustion ceiling defense: validate parameters before Argon2 allocation
+        header.validate_resource_limits()?;
+
+        Ok(header)
     }
 }
 
@@ -343,6 +383,20 @@ pub fn derive_backup_key(
 ) -> Result<Zeroizing<[u8; 32]>, BackupContainerError> {
     validate_passphrase(passphrase)?;
 
+    // Resource Exhaustion Defense: enforce parameter ceilings before Argon2 derivation
+    let max_kib = 1u32 << MAX_ALLOWED_MEMORY_EXPONENT;
+    if m_cost_kib > max_kib {
+        return Err(BackupContainerError::MemoryExponentExceedsCeiling(
+            MAX_ALLOWED_MEMORY_EXPONENT + 1,
+        ));
+    }
+    if t_cost > MAX_ALLOWED_TIME_COST as u32 {
+        return Err(BackupContainerError::TimeCostExceedsCeiling(t_cost as u8));
+    }
+    if p_cost > MAX_ALLOWED_PARALLELISM as u32 {
+        return Err(BackupContainerError::ParallelismExceedsCeiling(p_cost as u8));
+    }
+
     if salt.len() < BACKUP_SALT_SIZE {
         return Err(BackupContainerError::KdfError(format!(
             "Salt too short: expected {} bytes, got {}",
@@ -367,6 +421,7 @@ pub fn derive_key_from_header(
     passphrase: &str,
     header: &BackupHeader,
 ) -> Result<Zeroizing<[u8; 32]>, BackupContainerError> {
+    header.validate_resource_limits()?;
     let m_cost_kib = header.memory_kib()? as u32;
     derive_backup_key(
         passphrase,

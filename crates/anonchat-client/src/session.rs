@@ -248,5 +248,133 @@ impl AnonChatEngine {
 
         Ok(decrypted_messages)
     }
+
+    /// Exports a self-describing encrypted backup container (Sub-Steps 3.1–3.4).
+    ///
+    /// 1. Serializes client identity secrets into `SerializedIdentityState`.
+    /// 2. Collects contacts, verification records, ratchet sessions, and unexpired messages.
+    /// 3. Serializes `BackupData` to JSON bytes.
+    /// 4. Encrypts payload with Argon2id + AES-256-GCM + 38-byte header AAD.
+    /// 5. Returns container bytes `[42-byte header || ciphertext]`.
+    pub async fn export_backup(&self, passphrase: &str) -> Result<Vec<u8>> {
+        let serialized_identity = {
+            let id = self.identity.read().await;
+            id.to_serialized()
+        };
+
+        let contacts = self.db.list_contacts().context("Failed to list contacts")?;
+        let verification_states = self
+            .db
+            .list_all_verification_states()
+            .context("Failed to list verification states")?;
+        let messages = self
+            .db
+            .list_all_unexpired_messages()
+            .context("Failed to list messages")?;
+
+        // Collect ratchet sessions
+        let mut ratchet_sessions = Vec::new();
+        {
+            let ratchets = self.active_ratchets.read().await;
+            for (peer_id, session) in ratchets.iter() {
+                let serialized = session.to_serialized();
+                let json = serde_json::to_string(&serialized)
+                    .context("Failed to serialize ratchet session")?;
+                ratchet_sessions.push(crate::storage::StoredRatchetSession {
+                    peer_user_id: peer_id.clone(),
+                    session_json: json,
+                    updated_at: Utc::now().timestamp(),
+                });
+            }
+        }
+
+        let backup_data = crate::storage::BackupData {
+            version: 1,
+            created_at: Utc::now().timestamp(),
+            identity: serialized_identity,
+            contacts,
+            verification_states,
+            ratchet_sessions,
+            messages,
+        };
+
+        let json_bytes = serde_json::to_vec(&backup_data)
+            .context("Failed to serialize backup data to JSON")?;
+
+        let container = anonchat_crypto::BackupContainer::encrypt_with_passphrase(
+            passphrase,
+            &json_bytes,
+            anonchat_crypto::DEFAULT_ARGON2_TIME_COST,
+            anonchat_crypto::DEFAULT_ARGON2_MEMORY_EXPONENT,
+            anonchat_crypto::DEFAULT_ARGON2_PARALLELISM,
+        )
+        .context("Failed to encrypt backup container")?;
+
+        Ok(container.to_bytes())
+    }
+
+    /// Restores complete client state from a backup container file (Sub-Step 3.4 Restore Path).
+    ///
+    /// 1. Reads the 42-byte header, validates magic == "ANON" and version == 0x01.
+    /// 2. Enforces resource exhaustion ceilings before Argon2:
+    ///    - memory_exponent <= 20
+    ///    - time_cost <= 10
+    ///    - parallelism <= 4
+    /// 3. Derives 256-bit key from file's header parameters.
+    /// 4. Decrypts AES-256-GCM ciphertext using header bytes 0..37 as AAD.
+    ///    Reports: "Incorrect passphrase or corrupted backup file." on any failure.
+    /// 5. Deserializes plaintext JSON into `BackupData`.
+    /// 6. Imports identity keys, ratchet sessions, verification records, and messages.
+    pub async fn restore_backup(
+        &self,
+        container_bytes: &[u8],
+        passphrase: &str,
+    ) -> Result<crate::storage::BackupData> {
+        let container = anonchat_crypto::BackupContainer::from_bytes(container_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid backup file format: {}", e))?;
+
+        let decrypted_bytes = container
+            .decrypt_with_passphrase(passphrase)
+            .map_err(|_| anyhow::anyhow!("Incorrect passphrase or corrupted backup file."))?;
+
+        let backup_data: crate::storage::BackupData = serde_json::from_slice(&decrypted_bytes)
+            .map_err(|_| anyhow::anyhow!("Incorrect passphrase or corrupted backup file."))?;
+
+        // 1. Reconstruct and import ClientIdentity
+        let restored_identity = ClientIdentity::from_serialized(&backup_data.identity)
+            .context("Failed to reconstruct client identity from backup")?;
+        {
+            let mut id_lock = self.identity.write().await;
+            *id_lock = restored_identity;
+        }
+
+        // 2. Import contacts, verification records, ratchet sessions, messages atomically into SQLCipher
+        self.db
+            .restore_backup_data(&backup_data)
+            .context("Failed to restore backup data into encrypted database")?;
+
+        // 3. Load restored ratchet sessions into active memory
+        {
+            let mut ratchets_lock = self.active_ratchets.write().await;
+            ratchets_lock.clear();
+            for session_entry in &backup_data.ratchet_sessions {
+                if let Ok(serialized) =
+                    serde_json::from_str::<anonchat_crypto::SerializedRatchetSession>(
+                        &session_entry.session_json,
+                    )
+                {
+                    let session = RatchetSession::from_serialized(&serialized);
+                    ratchets_lock.insert(session_entry.peer_user_id.clone(), session);
+                }
+            }
+        }
+
+        info!(
+            "Successfully restored AnonChat state from backup container: user_id={}",
+            self.identity.read().await.user_id()
+        );
+
+        Ok(backup_data)
+    }
 }
 

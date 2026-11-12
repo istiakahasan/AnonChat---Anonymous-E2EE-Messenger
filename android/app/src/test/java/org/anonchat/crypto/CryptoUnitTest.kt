@@ -125,6 +125,24 @@ class CryptoUnitTest {
 
         val decrypted = BackupContainer.decryptWithPassphrase(strongPassphrase, container)
         assertArrayEquals(sampleData, decrypted)
+
+        // Resource Exhaustion Defense test: reject memory_exponent > 20
+        val maliciousHeaderBytes = container.header.toBytes()
+        maliciousHeaderBytes[7] = 21.toByte() // memory_exponent = 21 > 20
+        try {
+            BackupContainer.Header.fromBytes(maliciousHeaderBytes)
+            fail("Should have rejected memory_exponent exceeding ceiling")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("resource exhaustion defense"))
+        }
+
+        // Uniform error on wrong passphrase
+        try {
+            BackupContainer.decryptWithPassphrase("Wrong-Passphrase-999!", container)
+            fail("Should have failed decryption with wrong passphrase")
+        } catch (e: SecurityException) {
+            assertEquals("Incorrect passphrase or corrupted backup file.", e.message)
+        }
     }
 }
 

@@ -244,4 +244,85 @@ impl ClientIdentity {
         let bytes = self.identity_private.expose_secret().0;
         SigningKey::from_bytes(&bytes)
     }
+
+    /// Serializes the complete client identity state (private keys + metadata) for backup.
+    pub fn to_serialized(&self) -> SerializedIdentityState {
+        SerializedIdentityState {
+            identity_private_bytes: self.identity_private.expose_secret().0,
+            identity_dh_private_bytes: self.identity_dh_private.expose_secret().0,
+            signed_prekey_id: self.signed_prekey_id,
+            signed_prekey_private_bytes: self.signed_prekey_private.expose_secret().0,
+            signed_prekey_signature_bytes: self.signed_prekey_signature.to_bytes(),
+            one_time_prekeys: self
+                .one_time_prekeys
+                .iter()
+                .map(|(id, sec, _)| SerializedOneTimePreKey {
+                    id: *id,
+                    private_key_bytes: sec.expose_secret().0,
+                })
+                .collect(),
+        }
+    }
+
+    /// Reconstructs and validates a `ClientIdentity` from serialized state.
+    pub fn from_serialized(state: &SerializedIdentityState) -> Result<Self, IdentityError> {
+        let signing_key = SigningKey::from_bytes(&state.identity_private_bytes);
+        let identity_public = signing_key.verifying_key();
+
+        let id_dh_secret = StaticSecret::from(state.identity_dh_private_bytes);
+        let identity_dh_public = X25519PublicKey::from(&id_dh_secret);
+
+        let spk_secret = StaticSecret::from(state.signed_prekey_private_bytes);
+        let signed_prekey_public = X25519PublicKey::from(&spk_secret);
+
+        let signed_prekey_signature = Signature::from_bytes(&state.signed_prekey_signature_bytes);
+        identity_public
+            .verify(signed_prekey_public.as_bytes(), &signed_prekey_signature)
+            .map_err(|_| IdentityError::SignatureVerificationFailed)?;
+
+        let mut one_time_prekeys = Vec::with_capacity(state.one_time_prekeys.len());
+        for opk in &state.one_time_prekeys {
+            let secret = StaticSecret::from(opk.private_key_bytes);
+            let public = X25519PublicKey::from(&secret);
+            one_time_prekeys.push((
+                opk.id,
+                Secret::new(SecretBytes32(opk.private_key_bytes)),
+                public,
+            ));
+        }
+
+        Ok(Self {
+            identity_private: Secret::new(SecretBytes32(state.identity_private_bytes)),
+            identity_public,
+            identity_dh_private: Secret::new(SecretBytes32(state.identity_dh_private_bytes)),
+            identity_dh_public,
+            signed_prekey_id: state.signed_prekey_id,
+            signed_prekey_private: Secret::new(SecretBytes32(state.signed_prekey_private_bytes)),
+            signed_prekey_public,
+            signed_prekey_signature,
+            one_time_prekeys,
+        })
+    }
+}
+
+/// Serialized representation of a single one-time prekey for encrypted backup.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct SerializedOneTimePreKey {
+    pub id: u32,
+    pub private_key_bytes: [u8; 32],
+}
+
+/// Serialized representation of local ClientIdentity secrets for encrypted backup.
+///
+/// Implements `Zeroize` and `ZeroizeOnDrop` so decrypted key material in RAM
+/// is securely wiped on drop.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct SerializedIdentityState {
+    pub identity_private_bytes: [u8; 32],
+    pub identity_dh_private_bytes: [u8; 32],
+    pub signed_prekey_id: u32,
+    pub signed_prekey_private_bytes: [u8; 32],
+    #[zeroize(skip)]
+    pub signed_prekey_signature_bytes: [u8; 64],
+    pub one_time_prekeys: Vec<SerializedOneTimePreKey>,
 }

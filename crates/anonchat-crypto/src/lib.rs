@@ -22,7 +22,9 @@ pub use backup::{
     validate_passphrase, BackupContainer, BackupContainerError, BackupHeader, BACKUP_AAD_SIZE,
     BACKUP_HEADER_SIZE, BACKUP_MAGIC, BACKUP_NONCE_SIZE, BACKUP_SALT_SIZE, BACKUP_TAG_SIZE,
     BACKUP_VERSION_1, CIPHER_ID_AES_256_GCM, DEFAULT_ARGON2_MEMORY_EXPONENT,
-    DEFAULT_ARGON2_PARALLELISM, DEFAULT_ARGON2_TIME_COST, KDF_ID_ARGON2ID, MIN_PASSPHRASE_LEN,
+    DEFAULT_ARGON2_PARALLELISM, DEFAULT_ARGON2_TIME_COST, KDF_ID_ARGON2ID,
+    MAX_ALLOWED_MEMORY_EXPONENT, MAX_ALLOWED_PARALLELISM, MAX_ALLOWED_TIME_COST,
+    MIN_PASSPHRASE_LEN,
 };
 pub use cipher::{
     decrypt_aes_gcm, encrypt_aes_gcm, pad_message, unpad_message, CipherError,
@@ -30,9 +32,12 @@ pub use cipher::{
 };
 pub use identity::{
     ClientIdentity, IdentityError, PreKeyBundle, PublicOneTimePreKey, SecretBytes32,
-    DEFAULT_ONE_TIME_PREKEYS_COUNT,
+    SerializedIdentityState, SerializedOneTimePreKey, DEFAULT_ONE_TIME_PREKEYS_COUNT,
 };
-pub use ratchet::{EncryptedEnvelope, MessageHeader, RatchetError, RatchetSession};
+pub use ratchet::{
+    EncryptedEnvelope, MessageHeader, RatchetError, RatchetSession, SerializedRatchetSession,
+    SerializedSkippedKey,
+};
 pub use safety_number::{
     compute_individual_fingerprint, derive_safety_number, ContactVerificationState,
     SIGNAL_FINGERPRINT_ITERATIONS,

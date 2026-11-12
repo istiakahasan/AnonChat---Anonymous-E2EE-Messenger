@@ -29,6 +29,11 @@ const int backupTagSize = 16;
 const int backupAadSize = 38;
 const int minPassphraseLen = 12;
 
+// Resource Exhaustion Defense Ceilings (Sub-Step 3.4)
+const int maxAllowedMemoryExponent = 20; // 1 << 20 KiB = 1 GiB
+const int maxAllowedTimeCost = 10;
+const int maxAllowedParallelism = 4;
+
 /// Enforces passphrase policy before key derivation:
 /// - Minimum 12 characters
 /// - Rejects weak repetitive or monotonic sequential strings
@@ -189,6 +194,23 @@ class BackupHeader {
     final memoryExponent = bytes[7];
     final parallelism = bytes[8];
 
+    // Resource Exhaustion Defense: enforce parameter ceilings before Argon2 KDF allocation
+    if (memoryExponent > maxAllowedMemoryExponent) {
+      throw FormatException(
+        'Argon2 parameter exceeds security ceiling: memory_exponent $memoryExponent > $maxAllowedMemoryExponent (resource exhaustion defense)',
+      );
+    }
+    if (timeCost > maxAllowedTimeCost) {
+      throw FormatException(
+        'Argon2 parameter exceeds security ceiling: time_cost $timeCost > $maxAllowedTimeCost (resource exhaustion defense)',
+      );
+    }
+    if (parallelism > maxAllowedParallelism) {
+      throw FormatException(
+        'Argon2 parameter exceeds security ceiling: parallelism $parallelism > $maxAllowedParallelism (resource exhaustion defense)',
+      );
+    }
+
     final salt = Uint8List.fromList(bytes.sublist(9, 25));
 
     final cipherId = bytes[25];
@@ -338,13 +360,17 @@ class BackupContainer {
       mac: Mac(macBytes),
     );
 
-    final decrypted = await aesGcm.decrypt(
-      secretBox,
-      secretKey: SecretKey(keyBytes),
-      aad: aad,
-    );
+    try {
+      final decrypted = await aesGcm.decrypt(
+        secretBox,
+        secretKey: SecretKey(keyBytes),
+        aad: aad,
+      );
 
-    return Uint8List.fromList(decrypted);
+      return Uint8List.fromList(decrypted);
+    } catch (_) {
+      throw const FormatException('Incorrect passphrase or corrupted backup file.');
+    }
   }
 }
 

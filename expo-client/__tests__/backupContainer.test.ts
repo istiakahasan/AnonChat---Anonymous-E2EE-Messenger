@@ -97,7 +97,21 @@ describe('BackupContainerService (Expo / React Native)', () => {
     tamperedHeader[5] ^= 0xff;
     await expect(
       decryptPayloadAesGcm(ciphertext, rawKey, nonce, tamperedHeader)
-    ).rejects.toThrow();
+    ).rejects.toThrow('Incorrect passphrase or corrupted backup file.');
+  });
+
+  test('rejects malicious headers violating resource exhaustion defense ceilings', () => {
+    const maliciousContainer = new Uint8Array(42 + 32);
+    maliciousContainer.set([0x41, 0x4e, 0x4f, 0x4e], 0); // "ANON"
+    maliciousContainer[4] = 0x01; // version
+    maliciousContainer[5] = 0x01; // kdfId
+    maliciousContainer[6] = 3;    // timeCost
+    maliciousContainer[7] = 25;   // memoryExponent = 25 > 20 (ceiling violation)
+    maliciousContainer[8] = 1;    // parallelism
+
+    expect(() => BackupContainerService.parseHeader(maliciousContainer)).toThrow(
+      /resource exhaustion defense/
+    );
   });
 });
 

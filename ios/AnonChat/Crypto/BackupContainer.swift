@@ -28,6 +28,11 @@ public struct BackupContainer {
     public static let aadSize: Int = 38
     public static let minPassphraseLength: Int = 12
 
+    // Resource Exhaustion Defense Ceilings (Sub-Step 3.4)
+    public static let maxAllowedMemoryExponent: UInt8 = 20 // 1 << 20 KiB = 1 GiB
+    public static let maxAllowedTimeCost: UInt8 = 10
+    public static let maxAllowedParallelism: UInt8 = 4
+
     public struct Header: Equatable {
         public let magic: [UInt8]
         public let version: UInt8
@@ -85,6 +90,18 @@ public struct BackupContainer {
             let timeCost = data[6]
             let memoryExponent = data[7]
             let parallelism = data[8]
+
+            // Resource Exhaustion Defense: enforce parameter ceilings before Argon2 allocation
+            guard memoryExponent <= BackupContainer.maxAllowedMemoryExponent else {
+                throw BackupError.memoryExponentExceedsCeiling(memoryExponent)
+            }
+            guard timeCost <= BackupContainer.maxAllowedTimeCost else {
+                throw BackupError.timeCostExceedsCeiling(timeCost)
+            }
+            guard parallelism <= BackupContainer.maxAllowedParallelism else {
+                throw BackupError.parallelismExceedsCeiling(parallelism)
+            }
+
             let salt = data.subdata(in: 9..<25)
 
             let cipherId = data[25]
@@ -119,6 +136,9 @@ public struct BackupContainer {
         case unsupportedCipher(UInt8)
         case payloadTruncated
         case decryptionFailed
+        case memoryExponentExceedsCeiling(UInt8)
+        case timeCostExceedsCeiling(UInt8)
+        case parallelismExceedsCeiling(UInt8)
         case passphraseTooShort(Int)
         case weakPassphrase(String)
         case saltTooShort
@@ -340,9 +360,12 @@ public struct BackupContainer {
         let tag = ciphertext.subdata(in: (ciphertext.count - BackupContainer.tagSize)..<ciphertext.count)
 
         let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ctOnly, tag: tag)
-        let plaintext = try AES.GCM.open(sealedBox, using: key, authenticating: aad)
-
-        return plaintext
+        do {
+            let plaintext = try AES.GCM.open(sealedBox, using: key, authenticating: aad)
+            return plaintext
+        } catch {
+            throw BackupError.decryptionFailed
+        }
     }
 }
 

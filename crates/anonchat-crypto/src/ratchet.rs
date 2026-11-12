@@ -393,3 +393,82 @@ fn kdf_ck(ck: [u8; 32]) -> ([u8; 32], [u8; 32]) {
     (next_ck_bytes, mk_bytes)
 }
 
+/// Serialized representation of a skipped message key for backup.
+#[derive(Clone, Debug, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct SerializedSkippedKey {
+    pub dh_pub_bytes: [u8; 32],
+    pub n: u32,
+    pub key_bytes: [u8; 32],
+}
+
+/// Serialized representation of an active Double Ratchet session for encrypted backup.
+#[derive(Clone, Debug, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct SerializedRatchetSession {
+    pub dhs_secret_bytes: [u8; 32],
+    pub dhs_public_bytes: [u8; 32],
+    pub dhr_public_bytes: Option<[u8; 32]>,
+    pub root_key_bytes: [u8; 32],
+    pub sending_chain_key_bytes: Option<[u8; 32]>,
+    pub receiving_chain_key_bytes: Option<[u8; 32]>,
+    pub ns: u32,
+    pub nr: u32,
+    pub pn: u32,
+    pub skipped_keys: Vec<SerializedSkippedKey>,
+}
+
+impl RatchetSession {
+    /// Serializes the ratchet session state for encrypted backup.
+    pub fn to_serialized(&self) -> SerializedRatchetSession {
+        let skipped_keys = self
+            .skipped_message_keys
+            .iter()
+            .map(|((dh_pub, n), key)| SerializedSkippedKey {
+                dh_pub_bytes: *dh_pub,
+                n: *n,
+                key_bytes: key.expose_secret().0,
+            })
+            .collect();
+
+        SerializedRatchetSession {
+            dhs_secret_bytes: self.dhs_secret.expose_secret().0,
+            dhs_public_bytes: *self.dhs_public.as_bytes(),
+            dhr_public_bytes: self.dhr_public.map(|k| *k.as_bytes()),
+            root_key_bytes: self.root_key.expose_secret().0,
+            sending_chain_key_bytes: self.sending_chain_key.as_ref().map(|k| k.expose_secret().0),
+            receiving_chain_key_bytes: self.receiving_chain_key.as_ref().map(|k| k.expose_secret().0),
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+            skipped_keys,
+        }
+    }
+
+    /// Reconstructs a ratchet session from serialized state.
+    pub fn from_serialized(state: &SerializedRatchetSession) -> Self {
+        let mut skipped_message_keys = HashMap::new();
+        for item in &state.skipped_keys {
+            skipped_message_keys.insert(
+                (item.dh_pub_bytes, item.n),
+                Secret::new(SecretBytes32(item.key_bytes)),
+            );
+        }
+
+        Self {
+            dhs_secret: Secret::new(SecretBytes32(state.dhs_secret_bytes)),
+            dhs_public: X25519PublicKey::from(state.dhs_public_bytes),
+            dhr_public: state.dhr_public_bytes.map(X25519PublicKey::from),
+            root_key: Secret::new(SecretBytes32(state.root_key_bytes)),
+            sending_chain_key: state
+                .sending_chain_key_bytes
+                .map(|b| Secret::new(SecretBytes32(b))),
+            receiving_chain_key: state
+                .receiving_chain_key_bytes
+                .map(|b| Secret::new(SecretBytes32(b))),
+            ns: state.ns,
+            nr: state.nr,
+            pn: state.pn,
+            skipped_message_keys,
+        }
+    }
+}
+

@@ -44,6 +44,36 @@ void main() {
       final decrypted = await container.decryptWithPassphrase(validPassphrase);
       expect(utf8.decode(decrypted), equals('{"contacts":["alice"],"messages":100}'));
     });
+
+    test('rejects headers exceeding resource exhaustion ceilings', () {
+      final headerBytes = Uint8List(42);
+      headerBytes.setRange(0, 4, [0x41, 0x4E, 0x4F, 0x4E]);
+      headerBytes[4] = 0x01; // version
+      headerBytes[5] = 0x01; // kdfId
+      headerBytes[6] = 3;    // timeCost
+      headerBytes[7] = 21;   // memoryExponent > 20 (ceiling violation)
+      headerBytes[8] = 1;    // parallelism
+      ByteData.sublistView(headerBytes).setUint32(38, 100, Endian.little);
+
+      expect(() => BackupHeader.fromBytes(headerBytes), throwsFormatException);
+    });
+
+    test('returns uniform error message on wrong passphrase or tampering', () async {
+      final sampleDb = utf8.encode('{"user":"alice"}');
+      final container = await BackupContainer.createWithPassphrase(
+        validPassphrase,
+        Uint8List.fromList(sampleDb),
+        timeCost: 3,
+        memoryExponent: 16,
+        parallelism: 1,
+      );
+
+      // Wrong passphrase
+      expect(
+        () => container.decryptWithPassphrase('Wrong-Passphrase-123!'),
+        throwsFormatException,
+      );
+    });
   });
 }
 

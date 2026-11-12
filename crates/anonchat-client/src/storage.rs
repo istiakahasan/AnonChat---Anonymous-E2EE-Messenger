@@ -11,6 +11,7 @@ use std::time::Duration;
 use chrono::Utc;
 use rusqlite::{params, Connection, Result as SqlResult};
 use secrecy::{ExposeSecret, Secret};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -27,7 +28,7 @@ pub enum LocalDbError {
     LockPoisoned,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredContact {
     pub friend_code: String,
     pub user_id: String,
@@ -35,7 +36,7 @@ pub struct StoredContact {
     pub ttl_seconds: Option<i64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: String,
     pub conversation_id: String,
@@ -44,6 +45,25 @@ pub struct StoredMessage {
     pub plaintext: String,
     pub timestamp: i64,
     pub expires_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredRatchetSession {
+    pub peer_user_id: String,
+    pub session_json: String,
+    pub updated_at: i64,
+}
+
+/// Backup payload data structure containing complete state for encrypted backup containers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupData {
+    pub version: u32,
+    pub created_at: i64,
+    pub identity: anonchat_crypto::SerializedIdentityState,
+    pub contacts: Vec<StoredContact>,
+    pub verification_states: Vec<anonchat_crypto::ContactVerificationState>,
+    pub ratchet_sessions: Vec<StoredRatchetSession>,
+    pub messages: Vec<StoredMessage>,
 }
 
 /// Thread-safe wrapper around SQLCipher encrypted connection.
@@ -340,6 +360,191 @@ impl ClientDatabase {
                 }
             }
         });
+    }
+
+    /// Saves a ratchet session JSON into the encrypted database.
+    pub fn save_ratchet_session(&self, peer_user_id: &str, session_json: &str) -> Result<(), LocalDbError> {
+        let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        let now = Utc::now().timestamp();
+        conn.execute(
+            r#"
+            INSERT INTO ratchet_sessions (peer_user_id, session_json, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT (peer_user_id) DO UPDATE SET
+                session_json = excluded.session_json,
+                updated_at = excluded.updated_at;
+            "#,
+            params![peer_user_id, session_json, now],
+        )?;
+        Ok(())
+    }
+
+    /// Fetches all stored ratchet sessions.
+    pub fn list_ratchet_sessions(&self) -> Result<Vec<StoredRatchetSession>, LocalDbError> {
+        let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        let mut stmt = conn.prepare("SELECT peer_user_id, session_json, updated_at FROM ratchet_sessions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredRatchetSession {
+                peer_user_id: row.get(0)?,
+                session_json: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })?;
+        let mut sessions = Vec::new();
+        for r in rows {
+            sessions.push(r?);
+        }
+        Ok(sessions)
+    }
+
+    /// Lists all contact verification states stored in the encrypted database.
+    pub fn list_all_verification_states(&self) -> Result<Vec<anonchat_crypto::ContactVerificationState>, LocalDbError> {
+        let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        let mut stmt = conn.prepare("SELECT contact_id, safety_number, verified_at, last_remote_key_hex FROM contact_verification")?;
+        let rows = stmt.query_map([], |row| {
+            let v_at: Option<i64> = row.get(2)?;
+            Ok(anonchat_crypto::ContactVerificationState {
+                contact_id: row.get(0)?,
+                safety_number: row.get(1)?,
+                verified_at: v_at.map(|v| v as u64),
+                last_remote_key_hex: row.get(3)?,
+            })
+        })?;
+        let mut states = Vec::new();
+        for r in rows {
+            states.push(r?);
+        }
+        Ok(states)
+    }
+
+    /// Lists all non-expired messages across all conversations.
+    pub fn list_all_unexpired_messages(&self) -> Result<Vec<StoredMessage>, LocalDbError> {
+        let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        let now = Utc::now().timestamp();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, conversation_id, sender_id, is_mine, plaintext, timestamp, expires_at
+            FROM messages
+            WHERE expires_at IS NULL OR expires_at > ?1
+            ORDER BY timestamp ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            let is_mine_int: i32 = row.get(3)?;
+            Ok(StoredMessage {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                sender_id: row.get(2)?,
+                is_mine: is_mine_int != 0,
+                plaintext: row.get(4)?,
+                timestamp: row.get(5)?,
+                expires_at: row.get(6)?,
+            })
+        })?;
+        let mut messages = Vec::new();
+        for r in rows {
+            messages.push(r?);
+        }
+        Ok(messages)
+    }
+
+    /// Atomically restores all backup data (contacts, verification states, ratchet sessions, messages)
+    /// into the encrypted database within a single SQLite transaction.
+    pub fn restore_backup_data(&self, data: &BackupData) -> Result<(), LocalDbError> {
+        let mut conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        let tx = conn.transaction()?;
+
+        // 1. Restore contacts
+        for contact in &data.contacts {
+            tx.execute(
+                r#"
+                INSERT INTO contacts (friend_code, user_id, nickname, ttl_seconds)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT (friend_code) DO UPDATE SET
+                    nickname = excluded.nickname,
+                    ttl_seconds = excluded.ttl_seconds;
+                "#,
+                params![
+                    contact.friend_code,
+                    contact.user_id,
+                    contact.nickname,
+                    contact.ttl_seconds
+                ],
+            )?;
+        }
+
+        // 2. Restore verification states
+        for state in &data.verification_states {
+            tx.execute(
+                r#"
+                INSERT INTO contact_verification (contact_id, safety_number, verified_at, last_remote_key_hex)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT (contact_id) DO UPDATE SET
+                    safety_number = excluded.safety_number,
+                    verified_at = excluded.verified_at,
+                    last_remote_key_hex = excluded.last_remote_key_hex;
+                "#,
+                params![
+                    state.contact_id,
+                    state.safety_number,
+                    state.verified_at,
+                    state.last_remote_key_hex
+                ],
+            )?;
+        }
+
+        // 3. Restore ratchet sessions
+        for session in &data.ratchet_sessions {
+            tx.execute(
+                r#"
+                INSERT INTO ratchet_sessions (peer_user_id, session_json, updated_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT (peer_user_id) DO UPDATE SET
+                    session_json = excluded.session_json,
+                    updated_at = excluded.updated_at;
+                "#,
+                params![
+                    session.peer_user_id,
+                    session.session_json,
+                    session.updated_at
+                ],
+            )?;
+        }
+
+        // 4. Restore messages (skip already expired messages)
+        let now = Utc::now().timestamp();
+        for msg in &data.messages {
+            if let Some(exp) = msg.expires_at {
+                if exp <= now {
+                    continue;
+                }
+            }
+            tx.execute(
+                r#"
+                INSERT OR REPLACE INTO messages (id, conversation_id, sender_id, is_mine, plaintext, timestamp, expires_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);
+                "#,
+                params![
+                    msg.id,
+                    msg.conversation_id,
+                    msg.sender_id,
+                    if msg.is_mine { 1 } else { 0 },
+                    msg.plaintext,
+                    msg.timestamp,
+                    msg.expires_at
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        info!(
+            "Restored backup data: {} contacts, {} verifications, {} sessions, {} messages",
+            data.contacts.len(),
+            data.verification_states.len(),
+            data.ratchet_sessions.len(),
+            data.messages.len()
+        );
+        Ok(())
     }
 }
 

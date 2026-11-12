@@ -27,6 +27,11 @@ export const BACKUP_TAG_SIZE = 16;
 export const BACKUP_AAD_SIZE = 38;
 export const MIN_PASSPHRASE_LEN = 12;
 
+// Resource Exhaustion Defense Ceilings (Sub-Step 3.4)
+export const MAX_ALLOWED_MEMORY_EXPONENT = 20; // 1 << 20 KiB = 1 GiB
+export const MAX_ALLOWED_TIME_COST = 10;
+export const MAX_ALLOWED_PARALLELISM = 4;
+
 export interface BackupHeader {
   magic: Uint8Array;
   version: number;
@@ -140,6 +145,24 @@ export class WebBackupContainerService {
     const timeCost = data[6];
     const memoryExponent = data[7];
     const parallelism = data[8];
+
+    // Resource Exhaustion Defense: enforce parameter ceilings before KDF derivation
+    if (memoryExponent > MAX_ALLOWED_MEMORY_EXPONENT) {
+      throw new Error(
+        `Argon2 parameter exceeds security ceiling: memory_exponent ${memoryExponent} > ${MAX_ALLOWED_MEMORY_EXPONENT} (resource exhaustion defense)`
+      );
+    }
+    if (timeCost > MAX_ALLOWED_TIME_COST) {
+      throw new Error(
+        `Argon2 parameter exceeds security ceiling: time_cost ${timeCost} > ${MAX_ALLOWED_TIME_COST} (resource exhaustion defense)`
+      );
+    }
+    if (parallelism > MAX_ALLOWED_PARALLELISM) {
+      throw new Error(
+        `Argon2 parameter exceeds security ceiling: parallelism ${parallelism} > ${MAX_ALLOWED_PARALLELISM} (resource exhaustion defense)`
+      );
+    }
+
     const salt = data.slice(9, 25);
 
     const cipherId = data[25];
@@ -290,18 +313,22 @@ export class WebBackupContainerService {
       header.parallelism
     );
 
-    const decryptedBuffer = await crypto.subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: header.nonce,
-        additionalData: aad,
-        tagLength: 128,
-      },
-      key,
-      ciphertext
-    );
+    try {
+      const decryptedBuffer = await crypto.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: header.nonce,
+          additionalData: aad,
+          tagLength: 128,
+        },
+        key,
+        ciphertext
+      );
 
-    return new Uint8Array(decryptedBuffer);
+      return new Uint8Array(decryptedBuffer);
+    } catch (_err) {
+      throw new Error('Incorrect passphrase or corrupted backup file.');
+    }
   }
 }
 
@@ -362,16 +389,20 @@ export async function decryptPayloadAesGcm(
       ? aadOrHeader.slice(0, BACKUP_AAD_SIZE)
       : aadOrHeader;
 
-  const decryptedBuffer = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce,
-      additionalData: aad,
-      tagLength: 128,
-    },
-    cryptoKey,
-    ciphertext
-  );
-  return new Uint8Array(decryptedBuffer);
+  try {
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: nonce,
+        additionalData: aad,
+        tagLength: 128,
+      },
+      cryptoKey,
+      ciphertext
+    );
+    return new Uint8Array(decryptedBuffer);
+  } catch (_err) {
+    throw new Error('Incorrect passphrase or corrupted backup file.');
+  }
 }
 

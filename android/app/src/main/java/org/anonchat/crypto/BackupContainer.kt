@@ -39,6 +39,11 @@ object BackupContainer {
     const val AAD_SIZE = 38
     const val MIN_PASSPHRASE_LEN = 12
 
+    // Resource Exhaustion Defense Ceilings (Sub-Step 3.4)
+    const val MAX_ALLOWED_MEMORY_EXPONENT: Byte = 20 // 1 << 20 KiB = 1 GiB
+    const val MAX_ALLOWED_TIME_COST: Byte = 10
+    const val MAX_ALLOWED_PARALLELISM: Byte = 4
+
     data class Header(
         val magic: ByteArray,
         val version: Byte,
@@ -95,6 +100,27 @@ object BackupContainer {
                 val timeCost = buffer.get()
                 val memoryExponent = buffer.get()
                 val parallelism = buffer.get()
+
+                // Resource Exhaustion Defense: enforce parameter ceilings before KDF derivation
+                val memExpInt = memoryExponent.toInt() and 0xFF
+                val timeCostInt = timeCost.toInt() and 0xFF
+                val parallelismInt = parallelism.toInt() and 0xFF
+
+                if (memExpInt > (MAX_ALLOWED_MEMORY_EXPONENT.toInt() and 0xFF)) {
+                    throw IllegalArgumentException(
+                        "Argon2 parameter exceeds security ceiling: memory_exponent $memExpInt > $MAX_ALLOWED_MEMORY_EXPONENT (resource exhaustion defense)"
+                    )
+                }
+                if (timeCostInt > (MAX_ALLOWED_TIME_COST.toInt() and 0xFF)) {
+                    throw IllegalArgumentException(
+                        "Argon2 parameter exceeds security ceiling: time_cost $timeCostInt > $MAX_ALLOWED_TIME_COST (resource exhaustion defense)"
+                    )
+                }
+                if (parallelismInt > (MAX_ALLOWED_PARALLELISM.toInt() and 0xFF)) {
+                    throw IllegalArgumentException(
+                        "Argon2 parameter exceeds security ceiling: parallelism $parallelismInt > $MAX_ALLOWED_PARALLELISM (resource exhaustion defense)"
+                    )
+                }
 
                 val salt = ByteArray(SALT_SIZE)
                 buffer.get(salt)
@@ -205,7 +231,11 @@ object BackupContainer {
         cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
         cipher.updateAAD(headerBytes, 0, AAD_SIZE)
 
-        return cipher.doFinal(container.ciphertext)
+        try {
+            return cipher.doFinal(container.ciphertext)
+        } catch (e: Exception) {
+            throw SecurityException("Incorrect passphrase or corrupted backup file.", e)
+        }
     }
 
     /**

@@ -167,5 +167,36 @@ let ciphertext = cipher.encrypt(
 - **Nonce Integrity**: The 12-byte nonce is embedded in both the header (offsets 26..38) and the GCM IV and authenticated through AAD.
 - **Ciphertext Integrity**: Tampering with any byte of ciphertext or the final 16-byte GCM authentication tag causes decryption to abort with zero plaintext leakage.
 
+---
+
+### 5.6 Sub-Step 3.4: Decrypt the Backup (Restore Path) & Resource Exhaustion Defense
+
+#### Decryption Path Workflow:
+1. **Header Parsing**: Read the 42-byte binary header. Validate magic bytes equal `"ANON"` (`0x41 0x4E 0x4F 0x4E`) and format version equals `0x01`. Unknown versions or corrupted magic are rejected immediately.
+2. **Resource Exhaustion Defense**:
+   A malicious backup file could declare exorbitant parameters (e.g. `memory_exponent = 30` -> 1 GiB per Argon2 invocation) to execute a Denial-of-Service / Out-Of-Memory attack on the restoring device.
+   **Hard ceilings enforced before derivation**:
+   - `memory_exponent <= 20` (max 1 GiB: $1 \ll 20\text{ KiB} = 1,048,576\text{ KiB}$)
+   - `time_cost <= 10` iterations
+   - `parallelism <= 4` lanes
+   Any container exceeding these ceilings is aborted *before* Argon2 initialization or memory allocation.
+3. **Parameter Evolution**:
+   Key derivation strictly uses the parameters embedded in the container header:
+   $$\text{key} = \text{Argon2id}(\text{passphrase}, \text{salt}, 1 \ll \text{memory\_exponent}, \text{time\_cost}, \text{parallelism}, 32)$$
+   Future app versions can increase Argon2 memory or iteration costs without breaking backward compatibility. The restore path reads whatever parameters the file specifies.
+4. **Authenticated Decryption**:
+   Decrypt ciphertext using AES-256-GCM with Additional Authenticated Data $\text{AAD} = \text{header}[0..38]$.
+   - On authentication failure or wrong passphrase: uniform error reported as:
+     `"Incorrect passphrase or corrupted backup file."`
+   - Invariant: Does **not** distinguish between an incorrect passphrase and a tampered/corrupted container to prevent timing and side-channel leakage.
+5. **State Restoration & Atomic DB Import**:
+   The decrypted plaintext JSON is deserialized into `BackupData`, and imported within an atomic SQLite/SQLCipher transaction:
+   - Client Ed25519 identity and X25519 DH keys are reconstructed and verified.
+   - Contact records, nicknames, and TTL preferences are updated.
+   - Contact Safety Number verification states are restored.
+   - Active Double Ratchet sessions are restored into memory and persisted.
+   - Non-expired chat messages are restored; expired messages are discarded.
+
+
 
 

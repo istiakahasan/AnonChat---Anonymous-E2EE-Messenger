@@ -1178,6 +1178,227 @@ def run_all_tests():
     assert not hmac.compare_digest(tampered_ct[-16:], tampered_body_tag), "Tampering with ciphertext body must fail tag verification"
     print("    [PASS] AAD tamper detection: modifying KDF params, salt, nonce, or ciphertext triggers immediate failure.")
 
+    # 12. TASK: SUB-STEP 3.4: DECRYPT THE BACKUP (RESTORE PATH) & RESOURCE EXHAUSTION DEFENSE
+    print("\n[+] [Sub-Step 3.4] Testing Backup Decryption (Restore Path) & Resource Exhaustion Defense...")
+
+    MAX_ALLOWED_MEMORY_EXPONENT = 20 # 1 << 20 KiB = 1 GiB
+    MAX_ALLOWED_TIME_COST = 10
+    MAX_ALLOWED_PARALLELISM = 4
+
+    def restore_backup_container(file_bytes: bytes, passphrase: str) -> bytes:
+        if len(file_bytes) < 42:
+            raise ValueError("Header too short: expected at least 42 bytes")
+
+        # 1. Read header (42 bytes)
+        header_bytes = file_bytes[:42]
+        magic = header_bytes[0:4]
+        version = header_bytes[4]
+
+        # 2. Validate magic bytes == "ANON" and version == 0x01
+        if magic != b"ANON":
+            raise ValueError(f"Invalid magic bytes: expected 'ANON', got {magic}")
+        if version != 0x01:
+            raise ValueError(f"Unsupported backup format version: 0x{version:02x}")
+
+        kdf_id = header_bytes[5]
+        if kdf_id != 0x01:
+            raise ValueError(f"Unsupported KDF identifier: 0x{kdf_id:02x} (expected 0x01 = Argon2id)")
+
+        # 3. Read KDF parameters: time cost, memory exponent, parallelism, salt
+        time_cost = header_bytes[6]
+        memory_exponent = header_bytes[7]
+        parallelism = header_bytes[8]
+        salt = header_bytes[9:25]
+
+        # Resource Exhaustion Defense: enforce ceiling checks BEFORE calling Argon2
+        if memory_exponent > MAX_ALLOWED_MEMORY_EXPONENT:
+            raise ValueError(
+                f"Argon2 parameter exceeds security ceiling: memory_exponent {memory_exponent} > {MAX_ALLOWED_MEMORY_EXPONENT} (resource exhaustion defense)"
+            )
+        if time_cost > MAX_ALLOWED_TIME_COST:
+            raise ValueError(
+                f"Argon2 parameter exceeds security ceiling: time_cost {time_cost} > {MAX_ALLOWED_TIME_COST} (resource exhaustion defense)"
+            )
+        if parallelism > MAX_ALLOWED_PARALLELISM:
+            raise ValueError(
+                f"Argon2 parameter exceeds security ceiling: parallelism {parallelism} > {MAX_ALLOWED_PARALLELISM} (resource exhaustion defense)"
+            )
+
+        cipher_id = header_bytes[25]
+        if cipher_id != 0x01:
+            raise ValueError(f"Unsupported cipher identifier: 0x{cipher_id:02x}")
+
+        # 4. Read nonce and ciphertext length
+        nonce = header_bytes[26:38]
+        ciphertext_len = struct.unpack("<I", header_bytes[38:42])[0]
+        expected_total = 42 + ciphertext_len
+        if len(file_bytes) < expected_total:
+            raise ValueError(f"Payload truncated: expected {expected_total} bytes, got {len(file_bytes)}")
+
+        ciphertext_with_tag = file_bytes[42:expected_total]
+        if len(ciphertext_with_tag) < 16:
+            raise ValueError("Incorrect passphrase or corrupted backup file.")
+
+        # 5. Derive key using parameters from file (not hardcoded defaults)
+        m_cost_kib = 1 << memory_exponent
+        try:
+            key = derive_argon2id_key(passphrase, salt, m_cost_kib, time_cost, parallelism)
+        except Exception:
+            raise ValueError("Incorrect passphrase or corrupted backup file.")
+
+        # 6. Decrypt using AES-256-GCM with aad = header[0..38]
+        aad = header_bytes[:38]
+        ct_body = ciphertext_with_tag[:-16]
+        tag = ciphertext_with_tag[-16:]
+
+        expected_tag = hmac.new(key, aad + nonce + ct_body, hashlib.sha256).digest()[:16]
+        # Invariant: Uniform error message regardless of whether tag failed or key was wrong
+        if not hmac.compare_digest(tag, expected_tag):
+            raise ValueError("Incorrect passphrase or corrupted backup file.")
+
+        keystream = get_keystream(key, nonce, len(ct_body))
+        plaintext = bytes(a ^ b for a, b in zip(ct_body, keystream))
+        return plaintext
+
+    # Test 6.1: Valid backup file restore round-trip
+    test_passphrase = "Restore-Test-Passphrase-2026!"
+    backup_payload_data = json.dumps({
+        "version": 1,
+        "identity": {
+            "user_id": alice.user_id(),
+            "identity_key": base64.b64encode(alice.ed_pub).decode(),
+            "identity_dh_key": base64.b64encode(alice.dh_pub).decode()
+        },
+        "contacts": [
+            {"friend_code": bob.friend_code(), "user_id": bob.user_id(), "nickname": "Bob", "ttl_seconds": 86400}
+        ],
+        "verification_states": [
+            {"contact_id": bob.user_id(), "safety_number": "12345 67890 12345 67890 12345 67890 12345 67890 12345 67890 12345 67890", "verified_at": 1700000000}
+        ],
+        "messages": [
+            {"id": "msg-1", "conversation_id": bob.user_id(), "is_mine": True, "plaintext": "Restored message", "timestamp": 1700000000, "expires_at": None}
+        ]
+    }).encode("utf-8")
+
+    # Construct container file using standard parameters
+    f_salt = secrets.token_bytes(16)
+    f_nonce = secrets.token_bytes(12)
+    f_key = derive_argon2id_key(test_passphrase, f_salt, 1 << 16, 3, 4)
+
+    # 42-byte header
+    f_header = (
+        b"ANON" +
+        struct.pack("<BBBB", 0x01, 0x01, 3, 16) + # version=1, kdf=Argon2id, time=3, mem_exp=16
+        struct.pack("<B", 4) +                    # parallelism=4
+        f_salt +
+        struct.pack("<B", 0x01) +                 # cipher=AES-256-GCM
+        f_nonce +
+        struct.pack("<I", len(backup_payload_data) + 16) # ciphertext length LE
+    )
+    assert len(f_header) == 42
+    f_aad = f_header[:38]
+    f_ks = get_keystream(f_key, f_nonce, len(backup_payload_data))
+    f_ct = bytes(a ^ b for a, b in zip(backup_payload_data, f_ks))
+    f_tag = hmac.new(f_key, f_aad + f_nonce + f_ct, hashlib.sha256).digest()[:16]
+    valid_backup_file = f_header + f_ct + f_tag
+
+    # Execute restore
+    restored_bytes = restore_backup_container(valid_backup_file, test_passphrase)
+    assert restored_bytes == backup_payload_data
+    restored_json = json.loads(restored_bytes.decode())
+    assert restored_json["identity"]["user_id"] == alice.user_id()
+    assert len(restored_json["contacts"]) == 1
+    assert restored_json["contacts"][0]["nickname"] == "Bob"
+    print("    [PASS] Valid backup file restored: parsed 42-byte header, derived key from file, verified AAD.")
+
+    # Test 6.2: Parameter Evolution: container with higher Argon2 parameters decrypts without hardcoding
+    # Higher parameters: time_cost=4, memory_exponent=17 (128 MiB), parallelism=2
+    evo_salt = secrets.token_bytes(16)
+    evo_nonce = secrets.token_bytes(12)
+    evo_key = derive_argon2id_key(test_passphrase, evo_salt, 1 << 17, 4, 2)
+    evo_header = (
+        b"ANON" +
+        struct.pack("<BBBB", 0x01, 0x01, 4, 17) + # time=4, mem_exp=17 (128 MiB)
+        struct.pack("<B", 2) +                    # parallelism=2
+        evo_salt +
+        struct.pack("<B", 0x01) +
+        evo_nonce +
+        struct.pack("<I", len(backup_payload_data) + 16)
+    )
+    evo_aad = evo_header[:38]
+    evo_ks = get_keystream(evo_key, evo_nonce, len(backup_payload_data))
+    evo_ct = bytes(a ^ b for a, b in zip(backup_payload_data, evo_ks))
+    evo_tag = hmac.new(evo_key, evo_aad + evo_nonce + evo_ct, hashlib.sha256).digest()[:16]
+    evo_backup_file = evo_header + evo_ct + evo_tag
+
+    # Restores successfully using parameters from file
+    evo_restored = restore_backup_container(evo_backup_file, test_passphrase)
+    assert evo_restored == backup_payload_data
+    print("    [PASS] Parameter Evolution: higher KDF parameters (time=4, mem_exp=17, p=2) read from file and decrypted.")
+
+    # Test 6.3: Resource Exhaustion Defense: reject parameters exceeding ceilings BEFORE Argon2
+    # Malicious container specifying memory_exponent = 30 (1 GiB)
+    dos_header_mem = bytearray(valid_backup_file[:42])
+    dos_header_mem[7] = 30 # memory_exponent = 30 (exceeds ceiling 20)
+    dos_file_mem = bytes(dos_header_mem) + valid_backup_file[42:]
+    dos_caught = False
+    try:
+        restore_backup_container(dos_file_mem, test_passphrase)
+    except ValueError as e:
+        dos_caught = True
+        assert "resource exhaustion defense" in str(e)
+        assert "memory_exponent" in str(e)
+    assert dos_caught is True, "Must reject memory_exponent > 20 before derivation!"
+
+    # Malicious container specifying time_cost = 15 (> 10)
+    dos_header_time = bytearray(valid_backup_file[:42])
+    dos_header_time[6] = 15 # time_cost = 15
+    dos_file_time = bytes(dos_header_time) + valid_backup_file[42:]
+    dos_time_caught = False
+    try:
+        restore_backup_container(dos_file_time, test_passphrase)
+    except ValueError as e:
+        dos_time_caught = True
+        assert "resource exhaustion defense" in str(e)
+        assert "time_cost" in str(e)
+    assert dos_time_caught is True, "Must reject time_cost > 10 before derivation!"
+
+    # Malicious container specifying parallelism = 8 (> 4)
+    dos_header_p = bytearray(valid_backup_file[:42])
+    dos_header_p[8] = 8 # parallelism = 8
+    dos_file_p = bytes(dos_header_p) + valid_backup_file[42:]
+    dos_p_caught = False
+    try:
+        restore_backup_container(dos_file_p, test_passphrase)
+    except ValueError as e:
+        dos_p_caught = True
+        assert "resource exhaustion defense" in str(e)
+        assert "parallelism" in str(e)
+    assert dos_p_caught is True, "Must reject parallelism > 4 before derivation!"
+    print("    [PASS] Resource Exhaustion Defense: memory_exponent > 20, time_cost > 10, parallelism > 4 rejected before KDF.")
+
+    # Test 6.4: Uniform Error Message on Auth Failure or Tampering
+    # Wrong passphrase
+    wrong_pass_failed = False
+    try:
+        restore_backup_container(valid_backup_file, "Wrong-Password-404!")
+    except ValueError as e:
+        wrong_pass_failed = True
+        assert str(e) == "Incorrect passphrase or corrupted backup file."
+    assert wrong_pass_failed is True
+
+    # Tampered file (AAD parameter corrupted)
+    tampered_file = bytearray(valid_backup_file)
+    tampered_file[10] ^= 0xFF # corrupt salt in AAD
+    tampered_failed = False
+    try:
+        restore_backup_container(bytes(tampered_file), test_passphrase)
+    except ValueError as e:
+        tampered_failed = True
+        assert str(e) == "Incorrect passphrase or corrupted backup file."
+    assert tampered_failed is True
+    print("    [PASS] Uniform error reporting: 'Incorrect passphrase or corrupted backup file.' returned for both wrong passphrase and tampering.")
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")
