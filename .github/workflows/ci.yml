@@ -53,5 +53,5 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Blind Relay image
-        run: docker compose build
+        run: docker build -t anonchat-relay:latest -f crates/anonchat-server/Dockerfile .
 
