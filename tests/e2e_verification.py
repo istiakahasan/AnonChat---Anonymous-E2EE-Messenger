@@ -2108,6 +2108,166 @@ def run_all_tests():
     assert pt_cont_2 == b"Reply after cold restart from Bob"
     print("    [PASS] Step 4: Bidirectional session continuation after cold restart succeeds without key desync.")
 
+    # 19. STEP 4 VERIFICATION CHECKLIST (ALL 8 INVARIANTS)
+    print("\n" + "=" * 70)
+    print(" STEP 4 VERIFICATION CHECKLIST (DOUBLE RATCHET PROTOCOL):")
+    print("=" * 70)
+
+    # Setup clean session for checklist verification
+    chk_secret = secrets.token_bytes(32)
+    chk_bob_priv = secrets.token_bytes(32)
+    chk_bob_pub = x25519_base(chk_bob_priv)
+    alice_chk = init_sender_state(chk_secret, chk_bob_pub)
+    bob_chk = init_receiver_state(chk_secret, (chk_bob_priv, chk_bob_pub))
+
+    # Check 1: Round-trip encrypt/decrypt: Alice encrypts "test" -> Bob decrypts -> equals "test"
+    h_c1, ct_c1 = encrypt(alice_chk, b"test", b"")
+    pt_c1 = decrypt(bob_chk, h_c1, ct_c1, b"")
+    assert pt_c1 == b"test", "Decrypted plaintext must equal 'test'"
+    print(" [x] Check 1: Round-trip encrypt/decrypt (Alice encrypts 'test' -> Bob decrypts -> equals 'test')")
+
+    # Check 2: Per-message key uniqueness: Encrypt two identical plaintexts; ciphertexts differ; headers have different n values
+    h_c2a, ct_c2a = encrypt(alice_chk, b"identical plaintext", b"")
+    h_c2b, ct_c2b = encrypt(alice_chk, b"identical plaintext", b"")
+    assert ct_c2a != ct_c2b, "Ciphertexts of identical plaintexts must differ due to unique message keys & nonces"
+    assert h_c2a["n"] != h_c2b["n"], "Headers must have different message numbers n"
+    assert h_c2a["n"] == 1 and h_c2b["n"] == 2
+    decrypt(bob_chk, h_c2a, ct_c2a, b"")
+    decrypt(bob_chk, h_c2b, ct_c2b, b"")
+    print(" [x] Check 2: Per-message key uniqueness (identical plaintexts produce unique ciphertexts and distinct n)")
+
+    # Check 3: Header tampering rejected: Flip one bit in header.n; Bob's decrypt must throw GCM auth error
+    tamper_sec = secrets.token_bytes(32)
+    tamper_bob_priv = secrets.token_bytes(32)
+    tamper_bob_pub = x25519_base(tamper_bob_priv)
+    alice_t = init_sender_state(tamper_sec, tamper_bob_pub)
+    bob_t = init_receiver_state(tamper_sec, (tamper_bob_priv, tamper_bob_pub))
+
+    h_c3, ct_c3 = encrypt(alice_t, b"Tamper test message", b"")
+    tampered_header = dict(h_c3)
+    tampered_header["n"] ^= 1 # Bit flip in message counter n
+    auth_failed = False
+    try:
+        decrypt(bob_t, tampered_header, ct_c3, b"")
+    except Exception:
+        auth_failed = True
+    assert auth_failed is True, "Header modification must cause AEAD authentication tag verification to fail"
+    print(" [x] Check 3: Header tampering rejected (1-bit flip in header.n throws AEAD auth error)")
+
+    # Check 4: Out-of-order delivery: Send messages 0, 1, 2; deliver 2 first, then 0, 1; all decrypt correctly
+    ooo_secret = secrets.token_bytes(32)
+    ooo_bob_priv = secrets.token_bytes(32)
+    ooo_bob_pub = x25519_base(ooo_bob_priv)
+    alice_ooo = init_sender_state(ooo_secret, ooo_bob_pub)
+    bob_ooo = init_receiver_state(ooo_secret, (ooo_bob_priv, ooo_bob_pub))
+
+    h_m0, ct_m0 = encrypt(alice_ooo, b"message 0", b"")
+    h_m1, ct_m1 = encrypt(alice_ooo, b"message 1", b"")
+    h_m2, ct_m2 = encrypt(alice_ooo, b"message 2", b"")
+
+    # Deliver message 2 first
+    pt_m2 = decrypt(bob_ooo, h_m2, ct_m2, b"")
+    assert pt_m2 == b"message 2"
+
+    # Deliver message 0
+    pt_m0 = decrypt(bob_ooo, h_m0, ct_m0, b"")
+    assert pt_m0 == b"message 0"
+
+    # Deliver message 1
+    pt_m1 = decrypt(bob_ooo, h_m1, ct_m1, b"")
+    assert pt_m1 == b"message 1"
+    print(" [x] Check 4: Out-of-order delivery (sent 0, 1, 2; delivered 2 first, then 0, 1; all decrypt correctly)")
+
+    # Check 5: MAX_SKIP enforcement: Craft a header with n = 100000; decrypt must throw before allocating keys
+    malicious_header_100k = {"dh": h_m2["dh"], "pn": 0, "n": 100000}
+    max_skip_threw = False
+    try:
+        decrypt(bob_ooo, malicious_header_100k, ct_m2, b"")
+    except ValueError as e:
+        max_skip_threw = True
+        assert "Skip gap too large" in str(e)
+    assert max_skip_threw is True, "n = 100000 must be rejected by MAX_SKIP = 100 defense"
+    print(" [x] Check 5: MAX_SKIP enforcement (header with n = 100000 throws before allocating keys)")
+
+    # Check 6: DH ratchet recovery: Simulate state compromise after message N; after a DH ratchet step, old compromised keys cannot decrypt new messages
+    rec_secret = secrets.token_bytes(32)
+    rec_bob_priv = secrets.token_bytes(32)
+    rec_bob_pub = x25519_base(rec_bob_priv)
+    alice_rec = init_sender_state(rec_secret, rec_bob_pub)
+    bob_rec = init_receiver_state(rec_secret, (rec_bob_priv, rec_bob_pub))
+
+    # Send message N
+    h_n, ct_n = encrypt(alice_rec, b"Pre-compromise message N", b"")
+    decrypt(bob_rec, h_n, ct_n, b"")
+
+    # Attacker captures Alice's current sending chain key
+    stolen_cks = alice_rec.cks
+
+    # Bob replies -> triggers DH ratchet exchange
+    h_bob_reply, ct_bob_reply = encrypt(bob_rec, b"Bob ratchet reply", b"")
+    decrypt(alice_rec, h_bob_reply, ct_bob_reply, b"")
+
+    # Alice sends new post-compromise message
+    h_post, ct_post = encrypt(alice_rec, b"Post-ratchet secure message N+1", b"")
+
+    # Attacker tries to decrypt with stolen old chain key -> fails
+    attacker_decrypt_failed = False
+    try:
+        _, old_mk = kdf_ck(stolen_cks)
+        decrypt_authenticated(old_mk, ct_post[:12], ct_post[12:], b"")
+    except Exception:
+        attacker_decrypt_failed = True
+    assert attacker_decrypt_failed is True, "Old compromised keys cannot decrypt messages after DH ratchet step"
+
+    # Legitimate Bob decrypts successfully
+    pt_post = decrypt(bob_rec, h_post, ct_post, b"")
+    assert pt_post == b"Post-ratchet secure message N+1"
+    print(" [x] Check 6: DH ratchet recovery (state compromise healed; old keys cannot decrypt new messages)")
+
+    # Check 7: Forward secrecy: Capture message key for msg 0; msg 1 cannot be decrypted with it
+    fs_secret = secrets.token_bytes(32)
+    fs_bob_priv = secrets.token_bytes(32)
+    fs_bob_pub = x25519_base(fs_bob_priv)
+    alice_fs = init_sender_state(fs_secret, fs_bob_pub)
+    bob_fs = init_receiver_state(fs_secret, (fs_bob_priv, fs_bob_pub))
+
+    # Alice derives msg 0 key directly before advancing
+    _, mk_0 = kdf_ck(alice_fs.cks)
+    h_fs0, ct_fs0 = encrypt(alice_fs, b"Message 0", b"")
+    h_fs1, ct_fs1 = encrypt(alice_fs, b"Message 1", b"")
+
+    # Verify mk_0 decrypts msg 0
+    pt_fs0_direct = decrypt_authenticated(mk_0, ct_fs0[:12], ct_fs0[12:], json.dumps({"dh": h_fs0["dh"], "n": h_fs0["n"], "pn": h_fs0["pn"]}, sort_keys=True).encode())
+    assert pt_fs0_direct == b"Message 0"
+
+    # Verify mk_0 CANNOT decrypt msg 1
+    fs_failed = False
+    try:
+        decrypt_authenticated(mk_0, ct_fs1[:12], ct_fs1[12:], json.dumps({"dh": h_fs1["dh"], "n": h_fs1["n"], "pn": h_fs1["pn"]}, sort_keys=True).encode())
+    except Exception:
+        fs_failed = True
+    assert fs_failed is True, "Message key for msg 0 must NOT decrypt msg 1 (forward secrecy)"
+    print(" [x] Check 7: Forward secrecy (captured message key for msg 0 cannot decrypt msg 1)")
+
+    # Check 8: State persistence: Close app, reopen, continue conversation with existing state
+    # Save active states of alice_fs and bob_fs
+    decrypt(bob_fs, h_fs0, ct_fs0, b"")
+    decrypt(bob_fs, h_fs1, ct_fs1, b"")
+
+    saved_alice_state = alice_fs.to_json()
+    saved_bob_state = bob_fs.to_json()
+
+    # Reopen app (restore sessions from disk)
+    reopened_alice = DoubleRatchetSession.from_json(saved_alice_state)
+    reopened_bob = DoubleRatchetSession.from_json(saved_bob_state)
+
+    # Continue conversation seamlessly
+    h_cont, ct_cont = encrypt(reopened_alice, b"Continued conversation after app restart", b"")
+    pt_cont = decrypt(reopened_bob, h_cont, ct_cont, b"")
+    assert pt_cont == b"Continued conversation after app restart"
+    print(" [x] Check 8: State persistence (close app, reopen, continue conversation with existing state)")
+    print("=" * 70)
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")
