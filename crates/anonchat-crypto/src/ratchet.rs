@@ -60,11 +60,23 @@ pub enum RatchetError {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct MessageHeader {
     /// Sender's current DH ratchet public key (Base64)
-    pub dh_pub: String,
+    #[serde(alias = "dh_pub", rename = "dh")]
+    pub dh: String,
     /// Previous sending chain length
     pub pn: u32,
     /// Message number in the current sending chain
     pub n: u32,
+}
+
+impl MessageHeader {
+    pub fn new(dh: String, pn: u32, n: u32) -> Self {
+        Self { dh, pn, n }
+    }
+
+    /// Accessor for DH public key
+    pub fn dh_pub(&self) -> &str {
+        &self.dh
+    }
 }
 
 /// The encrypted message payload containing header, ciphertext, and nonce.
@@ -305,33 +317,73 @@ impl RatchetSession {
         Self::init_bob(&secret, spk_secret)
     }
 
-    /// Ratchet Encrypt: Encrypts an outbound plaintext message.
+    /// Performs a DH ratchet step to generate a new sending chain if CKs is null (Sub-Step 4.4).
+    pub fn perform_dh_ratchet_send(&mut self) -> Result<(), RatchetError> {
+        let peer_dh_public = self
+            .dhr_public
+            .ok_err(|| RatchetError::MissingSendingChain)?;
+
+        self.pn = self.ns;
+        self.ns = 0;
+
+        let mut csprng = OsRng;
+        let new_dhs_secret = StaticSecret::random_from_rng(&mut csprng);
+        let new_dhs_public = X25519PublicKey::from(&new_dhs_secret);
+
+        let dh_out_tx = new_dhs_secret.diffie_hellman(&peer_dh_public);
+        let (new_rk_tx, cks) = kdf_rk(self.root_key.expose_secret().0, dh_out_tx.as_bytes());
+
+        let mut new_dhs_priv_bytes = new_dhs_secret.to_bytes();
+        self.dhs_secret = Secret::new(SecretBytes32(new_dhs_priv_bytes));
+        new_dhs_priv_bytes.zeroize();
+        self.dhs_public = new_dhs_public;
+
+        self.root_key = Secret::new(SecretBytes32(new_rk_tx));
+        self.sending_chain_key = Some(Secret::new(SecretBytes32(cks)));
+        Ok(())
+    }
+
+    /// Ratchet Encrypt: Encrypts an outbound plaintext message (Sub-Step 4.2).
     ///
-    /// 1. Advances sending chain: `(next_cks, mk) = KDF_CK(cks)`
-    /// 2. Creates `MessageHeader { dh_pub, pn, n }`
-    /// 3. Serializes header to JSON as Associated Authenticated Data (AAD)
-    /// 4. Pads plaintext to 4096 bytes
-    /// 5. Encrypts with AES-256-GCM using `mk`
-    /// 6. Returns `EncryptedEnvelope`
+    /// Algorithm:
+    /// 1. If `CKs` is null, perform a DH ratchet step to generate a new sending chain.
+    /// 2. Derive next chain key and message key: `CKs_new, MK = KDF_CK(CKs)`
+    ///    Where KDF_CK is HMAC-SHA256 with constants (0x01 for message key, 0x02 for next chain key).
+    /// 3. Generate a random 12-byte nonce for AES-256-GCM.
+    /// 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
+    /// 5. Increment Ns.
+    /// 6. Encrypt with AES-256-GCM using `mk`, binding header as AAD.
+    /// 7. Return `EncryptedEnvelope`.
     pub fn ratchet_encrypt(&mut self, plaintext: &[u8]) -> Result<EncryptedEnvelope, RatchetError> {
+        // 1. If CKs is null, perform a DH ratchet step to generate a new sending chain
+        if self.sending_chain_key.is_none() {
+            self.perform_dh_ratchet_send()?;
+        }
+
         let cks_secret = self
             .sending_chain_key
             .as_ref()
             .ok_err(|| RatchetError::MissingSendingChain)?;
 
+        // 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs)
         let (next_cks, mk) = kdf_ck(cks_secret.expose_secret().0);
         self.sending_chain_key = Some(Secret::new(SecretBytes32(next_cks)));
 
+        // 3. Generate a random 12-byte nonce for AES-256-GCM
+        let mut nonce = [0u8; GCM_NONCE_SIZE];
+        OsRng.fill_bytes(&mut nonce);
+
+        // 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
         let header = MessageHeader {
-            dh_pub: BASE64.encode(self.dhs_public.as_bytes()),
+            dh: BASE64.encode(self.dhs_public.as_bytes()),
             pn: self.pn,
             n: self.ns,
         };
+        // 5. Increment Ns
         self.ns += 1;
 
         // Header authenticated via AAD
         let aad = serde_json::to_vec(&header)?;
-        let nonce = derive_nonce(header.n);
 
         let ciphertext = encrypt_aes_gcm(&mk, &nonce, plaintext, &aad)?;
 
@@ -351,7 +403,7 @@ impl RatchetSession {
     /// 5. Authenticates header as AAD and decrypts ciphertext with AES-256-GCM.
     /// 6. Strips 4KB padding and returns original plaintext.
     pub fn ratchet_decrypt(&mut self, envelope: &EncryptedEnvelope) -> Result<Vec<u8>, RatchetError> {
-        let peer_dh_bytes = BASE64.decode(&envelope.header.dh_pub)?;
+        let peer_dh_bytes = BASE64.decode(&envelope.header.dh)?;
         let peer_dh_bytes: [u8; 32] = peer_dh_bytes
             .try_into()
             .map_err(|_| RatchetError::InvalidPublicKey)?;

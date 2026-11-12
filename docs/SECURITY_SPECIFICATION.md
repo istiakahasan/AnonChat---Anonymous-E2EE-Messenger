@@ -258,11 +258,44 @@ After a successful upload, the client interface **MUST** display:
 
 #### Initial Handshake Transition:
 Upon receiving and authenticating Alice's first message envelope:
-1. Bob reads Alice's ephemeral DH public key (`header.dh_pub`).
+1. Bob reads Alice's ephemeral DH public key (`header.dh` / `header.dh_pub`).
 2. Bob advances the DH ratchet using `DH(bob_ratchet_keypair.priv, alice_dh_pub)` and derives `CKr`.
 3. Bob advances the receiving chain to decrypt the message payload.
 4. Bob transitions `BOB_FIRST_MESSAGE` from `true` to `false`.
 5. Bob generates a fresh DH keypair for subsequent replies.
+
+### 5.9 Sub-Step 4.2: Encrypt a Message (Sender Path)
+
+#### Per-Message Encryption Algorithm:
+1. **Lazy Sending Chain Initialization**:
+   - If sending chain key `CKs` is null:
+     - Verify peer's current ratchet public key `DHr` is known. If `DHr` is null (e.g., receiver state prior to receiving any incoming packet), abort with `MissingSendingChain`.
+     - Perform a Diffie-Hellman ratchet step (Sub-Step 4.4) to generate a fresh ephemeral keypair `DHs`, set `PNs = Ns`, reset `Ns = 0`, compute `DH(DHs_private, DHr)`, derive `RK_new` and `CKs` via `KDF_RK`.
+2. **Symmetric Chain Key Derivation**:
+   - Advance the symmetric sending chain using `KDF_CK(CKs)`:
+     $$\text{MK} = \text{HMAC-SHA256}(\text{CKs}, \texttt{0x01})$$
+     $$\text{CKs}_{\text{new}} = \text{HMAC-SHA256}(\text{CKs}, \texttt{0x02})$$
+   - Replace active `CKs` with $\text{CKs}_{\text{new}}$.
+3. **Random Nonce Generation**:
+   - Generate a fresh cryptographically secure random 12-byte nonce (96 bits) for AES-256-GCM using system CSPRNG (`OsRng` / `Random.secure()` / `crypto.getRandomValues`).
+   - *Security invariant*: Derivation of a unique, single-use `MK` per message eliminates collision vulnerabilities and counter-state tracking complexities.
+4. **Header Construction**:
+   - Construct the message header before incrementing $N_s$:
+     ```json
+     {
+       "dh": "<base64(DHs_public)>",
+       "pn": <PNs>,
+       "n": <Ns>
+     }
+     ```
+   - For backwards compatibility, parsers accept both `"dh"` and `"dh_pub"`.
+5. **Chain Counter Increment**:
+   - Increment sending counter: $N_s \leftarrow N_s + 1$.
+6. **Padding & AEAD Binding**:
+   - Plaintext payload is padded to fixed 4096-byte blocks with big-endian length prefix and random bytes.
+   - Header JSON is serialized and bound as AES-256-GCM **Additional Authenticated Data (AAD)**.
+   - Ciphertext output includes 16-byte GCM authentication tag appended at the end.
+
 
 
 

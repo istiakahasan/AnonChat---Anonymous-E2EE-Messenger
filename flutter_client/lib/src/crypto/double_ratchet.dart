@@ -229,30 +229,59 @@ class DoubleRatchetSession {
     this.sodium,
   }) : mkSkipped = mkSkipped ?? {};
 
-  /// Encrypts an outbound plaintext message.
-  ///
-  /// 1. Advances sending chain: (next_cks, mk) = KDF_CK(cks)
-  /// 2. Increments Ns
-  /// 3. Creates header { dh_pub, pn, n }
-  Map<String, dynamic> ratchetEncrypt(dynamic plaintext) {
-    if (sendingChainKey == null) {
-      throw StateError('Missing sending chain key');
+  /// Performs a Diffie-Hellman ratchet step to generate a new sending chain if CKs is null (Sub-Step 4.4).
+  void performDhRatchetSend() {
+    if (dhr == null) {
+      throw StateError('Cannot send message before receiving peer ratchet key');
     }
+    pns = ns;
+    ns = 0;
+    dhs = RatchetKeyPair.generate(sodium);
+    final dhOutTx = x25519(dhs.secretKey, dhr!);
+    final (newRkTx, cks) = _kdfRk(rootKey, dhOutTx);
+    rootKey = newRkTx;
+    sendingChainKey = cks;
+  }
+
+  /// Encrypts an outbound plaintext message (Sub-Step 4.2).
+  ///
+  /// Algorithm:
+  /// 1. If CKs is null, perform a DH ratchet step to generate a new sending chain.
+  /// 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs)
+  ///    Where KDF_CK is HMAC-SHA256 with constants (0x01 for message key, 0x02 for next chain key).
+  /// 3. Generate a random 12-byte nonce for AES-256-GCM.
+  /// 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
+  /// 5. Increment Ns (Ns += 1).
+  Map<String, dynamic> ratchetEncrypt(dynamic plaintext) {
+    // 1. If CKs is null, perform a DH ratchet step
+    if (sendingChainKey == null) {
+      performDhRatchetSend();
+    }
+
+    // 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs)
     final (nextCks, mk) = _kdfCk(sendingChainKey!);
     sendingChainKey = nextCks;
 
+    // 3. Generate a random 12-byte nonce for AES-256-GCM
+    final random = Random.secure();
+    final nonce = Uint8List(12);
+    for (int i = 0; i < 12; i++) {
+      nonce[i] = random.nextInt(256);
+    }
+
+    // 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
+    final dhB64 = base64.encode(dhs.publicKey);
     final header = {
-      'dh_pub': base64.encode(dhs.publicKey),
+      'dh': dhB64,
+      'dh_pub': dhB64,
       'pn': pns,
       'n': ns,
     };
+    // 5. Increment Ns
     ns += 1;
 
     final plainBytes = _toBytes(plaintext);
     final padded = _padTo4KB(plainBytes);
-
-    final nonce = Uint8List(12);
-    ByteData.view(nonce.buffer).setUint32(8, header['n'] as int, Endian.big);
 
     return {
       'header': header,
@@ -264,7 +293,8 @@ class DoubleRatchetSession {
 
   /// Processes received envelope and advances receiving / DH ratchet.
   void onMessageReceived(Map<String, dynamic> header) {
-    final peerDhBytes = base64.decode(header['dh_pub'] as String);
+    final dhStr = (header['dh'] ?? header['dh_pub']) as String;
+    final peerDhBytes = base64.decode(dhStr);
     if (dhr == null || !_bytesEqual(dhr!, peerDhBytes)) {
       pns = ns;
       ns = 0;

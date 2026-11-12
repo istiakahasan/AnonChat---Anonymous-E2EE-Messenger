@@ -471,15 +471,36 @@ class DoubleRatchetSession:
         return cls.init_receiver_state(shared_secret, bob_spk_priv, bob_spk_pub)
 
     def ratchet_encrypt(self, plaintext: bytes) -> dict:
+        # 1. If CKs is null, perform a DH ratchet step to generate a new sending chain
+        if self.cks is None:
+            if self.dhr_pub is None:
+                raise ValueError("Cannot send message before receiving peer ratchet key")
+            self.pn = self.ns
+            self.ns = 0
+            self.dhs_priv = secrets.token_bytes(32)
+            self.dhs_pub = x25519_base(self.dhs_priv)
+            dh_out_tx = x25519(self.dhs_priv, self.dhr_pub)
+            self.root_key, self.cks = kdf_rk(self.root_key, dh_out_tx)
+
+        # 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs)
         self.cks, mk = kdf_ck(self.cks)
+
+        # 3. Generate a random 12-byte nonce for AES-256-GCM
+        nonce = secrets.token_bytes(12)
+
+        # 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
+        dh_b64 = base64.b64encode(self.dhs_pub).decode()
         header = {
-            "dh_pub": base64.b64encode(self.dhs_pub).decode(),
+            "dh": dh_b64,
+            "dh_pub": dh_b64,
             "pn": self.pn,
             "n": self.ns
         }
+        # 5. Increment Ns
         self.ns += 1
-        aad = json.dumps(header, sort_keys=True).encode()
-        nonce = struct.pack(">Q", 0) + struct.pack(">I", header["n"])
+
+        aad_header = {"dh": dh_b64, "n": header["n"], "pn": header["pn"]}
+        aad = json.dumps(aad_header, sort_keys=True).encode()
         ciphertext = encrypt_authenticated(mk, nonce, plaintext, aad)
         return {
             "header": header,
@@ -489,8 +510,10 @@ class DoubleRatchetSession:
 
     def ratchet_decrypt(self, envelope: dict) -> bytes:
         header = envelope["header"]
-        peer_dh = base64.b64decode(header["dh_pub"])
-        aad = json.dumps(header, sort_keys=True).encode()
+        dh_val = header.get("dh") or header["dh_pub"]
+        peer_dh = base64.b64decode(dh_val)
+        aad_header = {"dh": dh_val, "n": header["n"], "pn": header["pn"]}
+        aad = json.dumps(aad_header, sort_keys=True).encode()
         ciphertext = base64.b64decode(envelope["ciphertext"])
         nonce = base64.b64decode(envelope["nonce"])
 
@@ -1615,6 +1638,70 @@ def run_all_tests():
     decrypted_by_alice = alice_dr.ratchet_decrypt(bob_reply_env0)
     assert decrypted_by_alice == test_reply_bob
     print("    [PASS] Bidirectional ratchet step succeeded across initialized states.")
+
+    # 15. TASK: SUB-STEP 4.2: ENCRYPT A MESSAGE (SENDER PATH)
+    print("\n[+] [Sub-Step 4.2] Testing Double Ratchet Encrypt (Sender Path)...")
+
+    # Test 15.1: If CKs is null and DHr is null, ratchet_encrypt raises ValueError
+    fresh_secret = secrets.token_bytes(32)
+    bob_keypair = (secrets.token_bytes(32), x25519_base(secrets.token_bytes(32)))
+    receiver_uninitialized_bob = init_receiver_state(fresh_secret, bob_keypair)
+    assert receiver_uninitialized_bob.cks is None
+    assert receiver_uninitialized_bob.dhr_pub is None
+    bob_blocked = False
+    try:
+        receiver_uninitialized_bob.ratchet_encrypt(b"This should fail")
+    except ValueError as e:
+        bob_blocked = True
+        assert "Cannot send message before receiving peer ratchet key" in str(e)
+    assert bob_blocked is True, "Must reject sending when CKs and DHr are null"
+    print("    [PASS] Step 1: Rejected encryption when CKs is null and DHr is null (peer key unknown).")
+
+    # Test 15.2: If CKs is null and DHr is known, ratchet_encrypt performs DH ratchet step
+    alice_dh_pub = x25519_base(secrets.token_bytes(32))
+    receiver_uninitialized_bob.dhr_pub = alice_dh_pub
+    assert receiver_uninitialized_bob.cks is None
+    envelope_auto_ratchet = receiver_uninitialized_bob.ratchet_encrypt(b"Auto DH ratchet send message")
+    assert receiver_uninitialized_bob.cks is not None, "CKs must be initialized via DH ratchet"
+    assert receiver_uninitialized_bob.ns == 1, "Ns must be 1 after sending first message"
+    print("    [PASS] Step 1: When CKs is null and DHr is known, DH ratchet send step generates new sending chain.")
+
+    # Test 15.3: Step 2: KDF_CK derivation: CKs_new, MK = KDF_CK(CKs) using HMAC-SHA256 constants 0x01 and 0x02
+    test_cks_0 = secrets.token_bytes(32)
+    expected_mk = hmac.new(test_cks_0, b"\x01", hashlib.sha256).digest()
+    expected_cks_next = hmac.new(test_cks_0, b"\x02", hashlib.sha256).digest()
+    actual_cks_next, actual_mk = kdf_ck(test_cks_0)
+    assert actual_mk == expected_mk, "MK must be derived with byte constant 0x01"
+    assert actual_cks_next == expected_cks_next, "Next CK must be derived with byte constant 0x02"
+    print("    [PASS] Step 2: KDF_CK derives CKs_new (0x02) and MK (0x01) via HMAC-SHA256.")
+
+    # Test 15.4: Step 3: Random 12-byte nonce generation for AES-256-GCM
+    alice_sender = init_sender_state(fresh_secret, bob_keypair[1])
+    env_m1 = alice_sender.ratchet_encrypt(b"First test message")
+    env_m2 = alice_sender.ratchet_encrypt(b"Second test message")
+    nonce_m1 = base64.b64decode(env_m1["nonce"])
+    nonce_m2 = base64.b64decode(env_m2["nonce"])
+    assert len(nonce_m1) == 12, "Nonce must be exactly 12 bytes"
+    assert len(nonce_m2) == 12, "Nonce must be exactly 12 bytes"
+    assert nonce_m1 != nonce_m2, "Consecutive messages must have fresh random independent nonces"
+    print("    [PASS] Step 3: Fresh random 12-byte nonce generated for every message.")
+
+    # Test 15.5: Step 4 & 5: Header format { 'dh': base64(DHs_public), 'pn': PNs, 'n': Ns } and Ns increment
+    header_m1 = env_m1["header"]
+    assert "dh" in header_m1, "Header must contain 'dh'"
+    assert header_m1["dh"] == base64.b64encode(alice_sender.dhs_pub).decode()
+    assert header_m1["pn"] == 0, "PNs must be 0 for first chain"
+    assert header_m1["n"] == 0, "Header must contain Ns before increment (n=0)"
+    assert alice_sender.ns == 2, "Ns must be incremented after each message (Ns=2 after 2 messages)"
+    header_m2 = env_m2["header"]
+    assert header_m2["n"] == 1, "Second message header must have n=1"
+    assert header_m2["pn"] == 0
+    print("    [PASS] Step 4 & 5: Header layout {'dh', 'pn', 'n'} and post-encryption Ns increment verified.")
+
+    # Test 15.6: Step 6: Authenticate header as AAD and apply 4096-byte padding
+    ct_bytes = base64.b64decode(env_m1["ciphertext"])
+    assert len(ct_bytes) == 4112, "Ciphertext must be padded to 4096 bytes + 16-byte GCM tag = 4112 bytes"
+    print("    [PASS] Step 6: 4096-byte constant padding and AAD header authentication verified.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

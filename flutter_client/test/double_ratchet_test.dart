@@ -63,6 +63,43 @@ void main() {
       expect(bobSession.dhr, equals(aliceSession.dhs.publicKey));
       expect(bobSession.sendingChainKey, isNotNull);
     });
+
+    test('Sub-Step 4.2: Encrypt a message (Sender Path) requirements', () {
+      final ratchet = DoubleRatchet();
+      final sharedSecret = Uint8List(32)..fillRange(0, 32, 0x88);
+      final bobRatchetKeyPair = RatchetKeyPair.generate();
+
+      final aliceSession = ratchet.initSenderSession(sharedSecret, bobRatchetKeyPair.publicKey);
+      final bobSession = ratchet.initReceiverSession(sharedSecret, bobRatchetKeyPair);
+
+      // 1. Bob cannot send before receiving peer ratchet key
+      expect(() => bobSession.ratchetEncrypt('Cannot send yet'), throwsA(isA<StateError>()));
+
+      // 2. Alice sends message: header contains dh, pn, n; ns increments
+      final env1 = aliceSession.ratchetEncrypt('Alice message 1');
+      expect(aliceSession.ns, equals(1));
+      final header1 = env1['header'] as Map<String, dynamic>;
+      expect(header1['dh'], equals(header1['dh_pub']));
+      expect(header1['n'], equals(0));
+      expect(header1['pn'], equals(0));
+      expect(env1['nonce'], isNotNull);
+
+      // 3. Alice sends second message: ns increments to 2, fresh random nonce generated
+      final env2 = aliceSession.ratchetEncrypt('Alice message 2');
+      expect(aliceSession.ns, equals(2));
+      final header2 = env2['header'] as Map<String, dynamic>;
+      expect(header2['n'], equals(1));
+      expect(header2['pn'], equals(0));
+      expect(env2['nonce'], isNot(equals(env1['nonce']))); // Random nonce independence
+
+      // 4. Bob receives Alice's message, then encrypts reply (CKs ratchet send step)
+      bobSession.onMessageReceived(header1);
+      final bobReply = bobSession.ratchetEncrypt('Bob reply 1');
+      expect(bobSession.ns, equals(1));
+      final bobHeader = bobReply['header'] as Map<String, dynamic>;
+      expect(bobHeader['n'], equals(0));
+      expect(bobHeader['dh'], isNotNull);
+    });
   });
 }
 

@@ -266,3 +266,139 @@ export function fromRatchetState(state: RatchetState): DoubleRatchetSessionState
     bobFirstMessage: state.DHr === null,
   };
 }
+
+/**
+ * Sub-Step 4.2: Encrypt a Message (Sender Path)
+ */
+export interface RatchetMessageHeader {
+  dh: string;
+  pn: number;
+  n: number;
+}
+
+export interface RatchetEnvelope {
+  header: RatchetMessageHeader;
+  ciphertext: string;
+  nonce: string;
+  mk?: string;
+}
+
+/**
+ * Derives next chain key and message key via HMAC-SHA256:
+ * CKs_new, MK = KDF_CK(CKs)
+ * Where 0x01 is for message key MK, and 0x02 is for next chain key CKs_new.
+ */
+export async function kdfCk(ck: Uint8Array): Promise<{ nextCk: Uint8Array; mk: Uint8Array }> {
+  const hmacKey = await crypto.subtle.importKey(
+    'raw',
+    ck,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const mkBuffer = await crypto.subtle.sign('HMAC', hmacKey, new Uint8Array([0x01]));
+  const nextCkBuffer = await crypto.subtle.sign('HMAC', hmacKey, new Uint8Array([0x02]));
+  return {
+    nextCk: new Uint8Array(nextCkBuffer),
+    mk: new Uint8Array(mkBuffer),
+  };
+}
+
+/**
+ * Pads plaintext to a 4096-byte constant block size with big-endian length prefix and random bytes.
+ */
+export function padTo4KB(payload: Uint8Array): Uint8Array {
+  const blockSize = 4096;
+  const minCapacity = 4 + payload.length;
+  const targetSize = Math.ceil(minCapacity / blockSize) * blockSize;
+  const padLen = targetSize - minCapacity;
+
+  const result = new Uint8Array(targetSize);
+  const view = new DataView(result.buffer);
+  view.setUint32(0, payload.length, false);
+  result.set(payload, 4);
+
+  const randomPad = crypto.getRandomValues(new Uint8Array(padLen));
+  result.set(randomPad, 4 + payload.length);
+  return result;
+}
+
+/**
+ * Encrypts an outbound plaintext message under Double Ratchet (Sub-Step 4.2).
+ *
+ * Algorithm:
+ * 1. If CKs is null, perform a DH ratchet step (see Sub-Step 4.4) to generate a new sending chain.
+ * 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs).
+ * 3. Generate a random 12-byte nonce for AES-256-GCM.
+ * 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }.
+ * 5. Increment Ns (Ns += 1).
+ * 6. Authenticate header as AAD and encrypt padded payload.
+ */
+export async function ratchetEncrypt(
+  state: RatchetState,
+  plaintext: Uint8Array | string,
+  performDhRatchet?: (state: RatchetState) => Promise<void>
+): Promise<RatchetEnvelope> {
+  // 1. If CKs is null, perform a DH ratchet step
+  if (!state.CKs) {
+    if (performDhRatchet) {
+      await performDhRatchet(state);
+    } else {
+      if (!state.DHr) {
+        throw new Error('Cannot send message before receiving peer ratchet key');
+      }
+      throw new Error('Missing sending chain key');
+    }
+  }
+
+  // 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs)
+  const cksBytes = base64ToUint8Array(state.CKs!);
+  const { nextCk, mk } = await kdfCk(cksBytes);
+  state.CKs = uint8ArrayToBase64(nextCk);
+
+  // 3. Generate a random 12-byte nonce for AES-256-GCM
+  const nonceBytes = crypto.getRandomValues(new Uint8Array(12));
+
+  // 4. Build header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
+  const header: RatchetMessageHeader = {
+    dh: state.DHs_pub,
+    pn: state.PNs,
+    n: state.Ns,
+  };
+
+  // 5. Increment Ns
+  state.Ns += 1;
+
+  // 6. Encrypt with AES-256-GCM with AAD
+  const rawBytes = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : plaintext;
+  const padded = padTo4KB(rawBytes);
+
+  const aad = new TextEncoder().encode(
+    JSON.stringify({
+      dh: header.dh,
+      n: header.n,
+      pn: header.pn,
+    })
+  );
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    mk,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+
+  const ctBuffer = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonceBytes, additionalData: aad, tagLength: 128 },
+    cryptoKey,
+    padded
+  );
+
+  return {
+    header,
+    ciphertext: uint8ArrayToBase64(new Uint8Array(ctBuffer)),
+    nonce: uint8ArrayToBase64(nonceBytes),
+    mk: uint8ArrayToBase64(mk),
+  };
+}
