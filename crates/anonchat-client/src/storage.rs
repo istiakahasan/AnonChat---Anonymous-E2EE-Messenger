@@ -379,6 +379,22 @@ impl ClientDatabase {
         Ok(())
     }
 
+    /// Fetches an individual stored ratchet session for a peer.
+    pub fn get_ratchet_session(&self, peer_user_id: &str) -> Result<Option<StoredRatchetSession>, LocalDbError> {
+        let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        let mut stmt = conn.prepare("SELECT peer_user_id, session_json, updated_at FROM ratchet_sessions WHERE peer_user_id = ?1")?;
+        let mut rows = stmt.query(params![peer_user_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(StoredRatchetSession {
+                peer_user_id: row.get(0)?,
+                session_json: row.get(1)?,
+                updated_at: row.get(2)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Fetches all stored ratchet sessions.
     pub fn list_ratchet_sessions(&self) -> Result<Vec<StoredRatchetSession>, LocalDbError> {
         let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;

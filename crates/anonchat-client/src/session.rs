@@ -17,7 +17,7 @@ use x25519_dalek::PublicKey as X25519PublicKey;
 
 use anonchat_crypto::{
     alice_initiate, bob_respond, seal_message, unseal_message, ClientIdentity, PreKeyBundle,
-    RatchetSession, SealedSenderEnvelope,
+    RatchetSession, SealedSenderEnvelope, SerializedRatchetSession,
 };
 
 use crate::client::RelayApiClient;

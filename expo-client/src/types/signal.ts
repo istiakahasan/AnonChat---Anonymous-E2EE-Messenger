@@ -51,3 +51,16 @@ export interface KeyChangeAlert {
   detectedAt: number;
 }
 
+/**
+ * Double Ratchet Session State Interface (Signal Protocol)
+ */
+export interface RatchetState {
+  DHs_pub: string; DHs_priv: string;  // current sender DH keypair (base64)
+  DHr: string | null;                  // peer's current DH public key
+  RK: string;                          // root key (32 bytes base64)
+  CKs: string | null;                  // sending chain key
+  CKr: string | null;                  // receiving chain key
+  Ns: number; Nr: number; PNs: number;
+  MKSKIPPED: Record<string, string>;   // key: "dhPub:msgNum"
+}
+
