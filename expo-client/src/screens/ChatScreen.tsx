@@ -13,7 +13,6 @@ import {
   ScrollView,
 } from 'react-native';
 import { useSignalChat } from '../hooks/useSignalChat';
-import { KeyChangeWarningModal } from '../components/KeyChangeWarningModal';
 import { SafetyNumberScanScreen } from './SafetyNumberScanScreen';
 import { SafetyNumberVerifyScreen } from './SafetyNumberVerifyScreen';
 import { SafetyNumberService } from '../crypto/safetyNumber';
@@ -24,6 +23,7 @@ interface Message {
   text: string;
   timestamp: string;
   isMine: boolean;
+  isSystemWarning?: boolean;
 }
 
 export interface SafetyMismatchState {
@@ -31,6 +31,13 @@ export interface SafetyMismatchState {
   expected: string;
   scanned: string;
   timestamp: number;
+}
+
+export interface KeyChangeState {
+  contactName: string;
+  detectedAt: number;
+  newKeyHex?: string;
+  previousKeyHex?: string;
 }
 
 export const ChatScreen: React.FC = () => {
@@ -52,6 +59,10 @@ export const ChatScreen: React.FC = () => {
   const [expectedSafetyNumber, setExpectedSafetyNumber] = useState(
     '58514 34043 94056 44585 48893 32257 82277 01943 81263 81849 42018 21380'
   );
+
+  // Key change detection lock: strictly disables message input field when active
+  const [keyChangeLock, setKeyChangeLock] = useState<KeyChangeState | null>(null);
+  const [showKeyChangeResolutionModal, setShowKeyChangeResolutionModal] = useState(false);
 
   // Persistent red mismatch banner state
   const [mismatchBanner, setMismatchBanner] = useState<SafetyMismatchState | null>(null);
@@ -84,11 +95,76 @@ export const ChatScreen: React.FC = () => {
     checkVerification();
   }, [contactName]);
 
+  /**
+   * KEY CHANGE DETECTION LOGIC:
+   * On every incoming message or session update, if the identity key has changed:
+   * 1. Set verifiedAt = null in local storage.
+   * 2. Insert persistent, non-dismissable system message in the chat:
+   *    "⚠️ [Contact Name]'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again."
+   * 3. DISABLE the message input field for that chat until the user resolves the warning.
+   */
+  const handleKeyChangeDetected = async (cName: string, newKeyHex?: string, prevKeyHex?: string) => {
+    // 1. Set verifiedAt = null in local storage
+    await SafetyNumberService.resetVerification(cName, newKeyHex);
+    setIsVerified(false);
+
+    // 2. Insert persistent non-dismissable system message in chat
+    const warningText = `⚠️ ${cName}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.`;
+
+    setMessages((prev) => {
+      // Avoid duplicate consecutive system warning messages
+      const last = prev[prev.length - 1];
+      if (last && last.isSystemWarning && last.text === warningText) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          id: `keychange_${Date.now()}`,
+          sender: 'System',
+          text: warningText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          isMine: false,
+          isSystemWarning: true,
+        },
+      ];
+    });
+
+    // 3. DISABLE the message input field for that chat
+    setKeyChangeLock({
+      contactName: cName,
+      detectedAt: Date.now(),
+      newKeyHex: newKeyHex || '4A5560EE65C96167969CDA8AF0773669113FDD4D5A4AB721475018FEA959BC81',
+      previousKeyHex: prevKeyHex,
+    });
+  };
+
+  // Sync protocol key change events
+  useEffect(() => {
+    if (keyChangeAlert) {
+      handleKeyChangeDetected(
+        keyChangeAlert.contactName,
+        keyChangeAlert.newKeyFingerprint,
+        keyChangeAlert.previousKeyFingerprint
+      );
+    }
+  }, [keyChangeAlert]);
+
   // Outbound send handler
   const handleSend = async () => {
     if (!inputText.trim()) return;
 
-    // Strict security check: Outbound messages are strictly blocked on safety number mismatch
+    // Strict security check 1: Input locked due to key change
+    if (keyChangeLock) {
+      Alert.alert(
+        'Sending Blocked: Key Change Detected',
+        `${contactName}'s security code has changed. Tap the warning message in the chat to verify or accept the new code before sending messages.`,
+        [{ text: 'OK', onPress: () => setShowKeyChangeResolutionModal(true) }]
+      );
+      return;
+    }
+
+    // Strict security check 2: Outbound messages blocked on safety number mismatch
     if (mismatchBanner) {
       Alert.alert(
         'Outbound Transmission Blocked',
@@ -121,6 +197,52 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
+  /**
+   * Resolution Choice A: Completes verification again (Safety Number matches)
+   */
+  const handleResolutionVerifyAgain = () => {
+    setShowKeyChangeResolutionModal(false);
+    setActiveModal('scan');
+  };
+
+  /**
+   * Resolution Choice B: Explicitly accepts the new key (with strict warning confirmation)
+   */
+  const handleResolutionExplicitAccept = () => {
+    Alert.alert(
+      'Security Warning: Accept Without Verification?',
+      `You are accepting a new security code for ${contactName} WITHOUT comparing Safety Numbers.\n\n` +
+        `If someone is intercepting your connection (Man-in-the-Middle attack), they will be able to decrypt, read, and modify your messages.\n\n` +
+        `Are you sure you want to trust this unverified key?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Accept Without Verification',
+          style: 'destructive',
+          onPress: async () => {
+            if (keyChangeLock?.newKeyHex) {
+              await SafetyNumberService.acceptNewKeyWithoutVerification(
+                contactName,
+                keyChangeLock.newKeyHex
+              );
+            }
+            if (approveKeyChange) {
+              await approveKeyChange();
+            }
+            // Unlock message input field
+            setKeyChangeLock(null);
+            setShowKeyChangeResolutionModal(false);
+            Alert.alert(
+              'New Key Accepted',
+              `The new security code for ${contactName} was accepted. Input field is now unlocked. Note that the contact remains unverified until verified.`,
+              [{ text: 'OK' }]
+            );
+          },
+        },
+      ]
+    );
+  };
+
   const handleConfirmDismissMismatch = () => {
     Alert.alert(
       'Dismiss Security Alert?',
@@ -145,10 +267,15 @@ export const ChatScreen: React.FC = () => {
     });
   };
 
+  // Called when verification succeeds (Safety Number matches)
   const handleVerifiedSuccess = () => {
     setIsVerified(true);
     setMismatchBanner(null);
+    setKeyChangeLock(null); // Unlocks message input field!
+    setShowKeyChangeResolutionModal(false);
   };
+
+  const isInputDisabled = Boolean(keyChangeLock || mismatchBanner);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -175,7 +302,7 @@ export const ChatScreen: React.FC = () => {
           </View>
         </View>
 
-        {/* Header Action Buttons for Verification */}
+        {/* Header Action Buttons */}
         <View style={styles.headerActions}>
           <TouchableOpacity
             style={styles.actionButton}
@@ -194,11 +321,22 @@ export const ChatScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* Safety Info Bar */}
+      {/* Safety Info Bar with Key Change Test Trigger */}
       <View style={styles.infoBar}>
         <Text style={styles.infoText}>
-          RegID: {publicBundle?.registrationId || 'Active'} | Tor Onion Routing | Isolated SecureStore
+          RegID: {publicBundle?.registrationId || 'Active'} | Tor Circuits Active
         </Text>
+        <TouchableOpacity
+          onPress={() =>
+            handleKeyChangeDetected(
+              contactName,
+              'F9E8D7C6B5A43210F9E8D7C6B5A43210F9E8D7C6B5A43210F9E8D7C6B5A43210',
+              'A1B2C3D4E5F60708A1B2C3D4E5F60708A1B2C3D4E5F60708A1B2C3D4E5F60708'
+            )
+          }
+        >
+          <Text style={styles.testTriggerText}>[Simulate Key Change]</Text>
+        </TouchableOpacity>
       </View>
 
       {/* ⚠️ PERSISTENT RED MISMATCH BANNER */}
@@ -237,50 +375,127 @@ export const ChatScreen: React.FC = () => {
         data={messages}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.messageList}
-        renderItem={({ item }) => (
-          <View
-            style={[
-              styles.messageBubble,
-              item.isMine ? styles.myBubble : styles.peerBubble,
-            ]}
-          >
-            <Text style={styles.messageText}>{item.text}</Text>
-            <Text style={styles.timestamp}>{item.timestamp}</Text>
-          </View>
-        )}
+        renderItem={({ item }) => {
+          // Render persistent, non-dismissable system message in chat
+          if (item.isSystemWarning) {
+            return (
+              <TouchableOpacity
+                style={styles.systemWarningBubble}
+                activeOpacity={0.85}
+                onPress={() => setShowKeyChangeResolutionModal(true)}
+              >
+                <View style={styles.systemWarningHeaderRow}>
+                  <Text style={styles.systemWarningIcon}>⚠️</Text>
+                  <Text style={styles.systemWarningTitle}>SECURITY CODE CHANGED</Text>
+                </View>
+                <Text style={styles.systemWarningText}>{item.text}</Text>
+                <View style={styles.systemWarningFooter}>
+                  <Text style={styles.systemWarningAction}>Tap to verify or resolve →</Text>
+                  <Text style={styles.systemWarningTimestamp}>{item.timestamp}</Text>
+                </View>
+              </TouchableOpacity>
+            );
+          }
+
+          return (
+            <View
+              style={[
+                styles.messageBubble,
+                item.isMine ? styles.myBubble : styles.peerBubble,
+              ]}
+            >
+              <Text style={styles.messageText}>{item.text}</Text>
+              <Text style={styles.timestamp}>{item.timestamp}</Text>
+            </View>
+          );
+        }}
       />
 
-      {/* Input Bar */}
+      {/* Input Bar (DISABLED while keyChangeLock or mismatch is active) */}
       <View style={styles.inputContainer}>
         <TextInput
-          style={[styles.input, mismatchBanner && styles.inputDisabled]}
+          style={[styles.input, isInputDisabled && styles.inputDisabled]}
           placeholder={
-            mismatchBanner
+            keyChangeLock
+              ? '🚫 Input disabled: Tap security warning above to verify'
+              : mismatchBanner
               ? '🚫 Transmission blocked: Safety Number mismatch'
               : 'Type an encrypted message...'
           }
-          placeholderTextColor={mismatchBanner ? '#FF8A80' : '#777777'}
+          placeholderTextColor={isInputDisabled ? '#FF8A80' : '#777777'}
           value={inputText}
           onChangeText={setInputText}
-          editable={!mismatchBanner}
+          editable={!isInputDisabled}
         />
         <TouchableOpacity
-          style={[styles.sendButton, mismatchBanner && styles.sendButtonDisabled]}
+          style={[styles.sendButton, isInputDisabled && styles.sendButtonDisabled]}
           onPress={handleSend}
-          disabled={Boolean(mismatchBanner)}
+          disabled={isInputDisabled}
         >
-          <Text style={[styles.sendButtonText, mismatchBanner && styles.sendButtonTextDisabled]}>
-            {mismatchBanner ? 'Blocked 🚫' : 'Send 🚀'}
+          <Text style={[styles.sendButtonText, isInputDisabled && styles.sendButtonTextDisabled]}>
+            {isInputDisabled ? 'Blocked 🚫' : 'Send 🚀'}
           </Text>
         </TouchableOpacity>
       </View>
 
-      {/* Key-Change Warning Modal from Protocol */}
-      <KeyChangeWarningModal
-        alert={keyChangeAlert}
-        onApprove={approveKeyChange}
-        onReject={rejectKeyChange}
-      />
+      {/* Modal: Key-Change Resolution Options Modal */}
+      <Modal
+        visible={showKeyChangeResolutionModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowKeyChangeResolutionModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.keyChangeCard}>
+            <Text style={styles.keyChangeIcon}>⚠️</Text>
+            <Text style={styles.keyChangeTitle}>Security Code Changed</Text>
+            <Text style={styles.keyChangeDescription}>
+              <Text style={styles.bold}>{contactName}</Text>&apos;s cryptographic identity key has changed.
+              {'\n\n'}
+              This could mean they reinstalled the app, switched devices, or someone may be intercepting
+              your messages (Man-in-the-Middle attack).
+              {'\n\n'}
+              Outbound message sending is <Text style={styles.boldRed}>LOCKED</Text> until resolved.
+            </Text>
+
+            <View style={styles.keyChangeChoicesContainer}>
+              {/* Option A: Complete verification again */}
+              <TouchableOpacity
+                style={styles.choiceButtonVerify}
+                onPress={handleResolutionVerifyAgain}
+              >
+                <Text style={styles.choiceButtonVerifyText}>
+                  ✓ Verify Again (Safety Number Match)
+                </Text>
+                <Text style={styles.choiceButtonSubtext}>
+                  Recommended: Scan their QR code or compare numbers.
+                </Text>
+              </TouchableOpacity>
+
+              {/* Option B: Explicitly accept new key */}
+              <TouchableOpacity
+                style={styles.choiceButtonAccept}
+                onPress={handleResolutionExplicitAccept}
+              >
+                <Text style={styles.choiceButtonAcceptText}>
+                  ⚠️ Accept New Key (Without Verification)
+                </Text>
+                <Text style={styles.choiceButtonAcceptSubtext}>
+                  Security risk: Trusts the new key without proof.
+                </Text>
+              </TouchableOpacity>
+
+              {/* Keep blocked */}
+              <TouchableOpacity
+                style={styles.choiceButtonCancel}
+                onPress={() => setShowKeyChangeResolutionModal(false)}
+              >
+                <Text style={styles.choiceButtonCancelText}>Keep Blocked (Cancel)</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Modal: QR Display Screen */}
       <Modal
@@ -343,7 +558,6 @@ export const ChatScreen: React.FC = () => {
                 {'\n'}• A malicious third party is attempting to impersonate your contact
               </Text>
 
-              {/* Expected Number */}
               <View style={styles.codeComparisonBox}>
                 <Text style={styles.codeLabel}>EXPECTED SAFETY NUMBER (LOCAL KEY):</Text>
                 <Text style={styles.codeValueExpected}>
@@ -351,7 +565,6 @@ export const ChatScreen: React.FC = () => {
                 </Text>
               </View>
 
-              {/* Scanned Number */}
               <View style={styles.codeComparisonBox}>
                 <Text style={styles.codeLabel}>SCANNED CODE (REMOTE DEVICE):</Text>
                 <Text style={styles.codeValueScanned}>
@@ -425,6 +638,10 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: 'bold',
   },
+  boldRed: {
+    color: '#FF5252',
+    fontWeight: 'bold',
+  },
   verificationBadge: {
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -474,11 +691,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#252525',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   infoText: {
     color: '#666666',
     fontSize: 10,
     fontFamily: 'monospace',
+  },
+  testTriggerText: {
+    color: '#FFB74D',
+    fontSize: 10,
+    fontWeight: '600',
   },
 
   /* ⚠️ PERSISTENT RED BANNER STYLES */
@@ -541,9 +766,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
 
+  /* Message List Styles */
   messageList: {
     padding: 16,
-    gap: 8,
+    gap: 10,
   },
   messageBubble: {
     maxWidth: '80%',
@@ -568,6 +794,58 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
     marginTop: 4,
   },
+
+  /* Persistent Non-Dismissable System Warning Message */
+  systemWarningBubble: {
+    backgroundColor: 'rgba(230, 81, 0, 0.15)',
+    borderWidth: 1.5,
+    borderColor: '#FF9800',
+    borderRadius: 12,
+    padding: 14,
+    marginVertical: 6,
+    alignSelf: 'center',
+    width: '95%',
+  },
+  systemWarningHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  systemWarningIcon: {
+    fontSize: 16,
+  },
+  systemWarningTitle: {
+    color: '#FFB74D',
+    fontSize: 12,
+    fontWeight: 'bold',
+    letterSpacing: 0.6,
+  },
+  systemWarningText: {
+    color: '#FFF3E0',
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  systemWarningFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 152, 0, 0.25)',
+    paddingTop: 8,
+  },
+  systemWarningAction: {
+    color: '#00D2B4',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  systemWarningTimestamp: {
+    color: '#B0BEC5',
+    fontSize: 10,
+  },
+
+  /* Input Bar Styles */
   inputContainer: {
     flexDirection: 'row',
     padding: 12,
@@ -610,7 +888,7 @@ const styles = StyleSheet.create({
     color: '#78909C',
   },
 
-  /* Mismatch Details Modal */
+  /* Modals Overlay */
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.85)',
@@ -618,6 +896,85 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 20,
   },
+
+  /* Key-Change Resolution Card */
+  keyChangeCard: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 440,
+    borderWidth: 2,
+    borderColor: '#FF9800',
+  },
+  keyChangeIcon: {
+    fontSize: 36,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  keyChangeTitle: {
+    color: '#FF9800',
+    fontSize: 19,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  keyChangeDescription: {
+    color: '#E0E0E0',
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  keyChangeChoicesContainer: {
+    gap: 12,
+  },
+  choiceButtonVerify: {
+    backgroundColor: '#00D2B4',
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  choiceButtonVerifyText: {
+    color: '#000000',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+  choiceButtonSubtext: {
+    color: '#00332C',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  choiceButtonAccept: {
+    backgroundColor: 'rgba(255, 82, 82, 0.15)',
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#FF5252',
+  },
+  choiceButtonAcceptText: {
+    color: '#FF5252',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  choiceButtonAcceptSubtext: {
+    color: '#FFCDD2',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  choiceButtonCancel: {
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  choiceButtonCancelText: {
+    color: '#888888',
+    fontSize: 13,
+  },
+
+  /* Mismatch Details Modal */
   detailsModalBox: {
     backgroundColor: '#1E1E1E',
     borderRadius: 16,

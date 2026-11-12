@@ -84,5 +84,36 @@ object SafetyNumber {
 
         return groups.joinToString(" ")
     }
+
+    /**
+     * Checks remote identity key against stored lastRemoteKey.
+     * Returns true if key has changed.
+     */
+    fun checkKeyChanged(currentKeyHex: String, storedState: VerificationState?): Boolean {
+        if (storedState == null) return false
+        return storedState.lastRemoteKeyHex != currentKeyHex
+    }
+
+    /**
+     * Step 1: Set verifiedAt = null in local storage when identity key change is detected.
+     */
+    fun resetVerification(storedState: VerificationState, newKeyHex: String? = null): VerificationState {
+        return storedState.copy(
+            verifiedAt = null,
+            lastRemoteKeyHex = newKeyHex ?: storedState.lastRemoteKeyHex
+        )
+    }
+
+    /**
+     * Explicitly accepts a new identity key without verification.
+     */
+    fun acceptNewKeyWithoutVerification(contactId: String, newKeyHex: String, safetyNumber: String): VerificationState {
+        return VerificationState(
+            contactId = contactId,
+            safetyNumber = safetyNumber,
+            verifiedAt = null,
+            lastRemoteKeyHex = newKeyHex
+        )
+    }
 }
 

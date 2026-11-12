@@ -34,7 +34,14 @@ import com.google.zxing.qrcode.QRCodeWriter
 enum class Screen { ONBOARDING, CHAT_LIST, CHAT_VIEW }
 
 data class ContactItem(val friendCode: String, val userId: String, val nickname: String, var ttlSeconds: Long?)
-data class MessageItem(val id: String, val senderId: String, val isMine: Boolean, val text: String, val timestamp: Long)
+data class MessageItem(
+    val id: String,
+    val senderId: String,
+    val isMine: Boolean,
+    val text: String,
+    val timestamp: Long,
+    val isSystemWarning: Boolean = false
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -161,12 +168,32 @@ fun ChatViewScreen(contact: ContactItem, onBack: () -> Unit) {
     var messageText by remember { mutableStateOf("") }
     var selectedTtl by remember { mutableStateOf(contact.ttlSeconds ?: 86400L) }
     var expandedDropdown by remember { mutableStateOf(false) }
+    var hasKeyChangeLock by remember { mutableStateOf(false) }
+    var showKeyChangeDialog by remember { mutableStateOf(false) }
+    var showAcceptWarningDialog by remember { mutableStateOf(false) }
 
     val messages = remember {
         mutableStateListOf(
             MessageItem("1", contact.userId, false, "Hello! Connected via X3DH & Tor.", System.currentTimeMillis() - 60000),
             MessageItem("2", "me", true, "Verified. Messages are padded to 4KB.", System.currentTimeMillis() - 30000)
         )
+    }
+
+    fun triggerKeyChange() {
+        val warning = "⚠️ ${contact.nickname}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again."
+        if (messages.none { it.isSystemWarning }) {
+            messages.add(
+                MessageItem(
+                    id = "keychange_${System.currentTimeMillis()}",
+                    senderId = "system",
+                    isMine = false,
+                    text = warning,
+                    timestamp = System.currentTimeMillis(),
+                    isSystemWarning = true
+                )
+            )
+        }
+        hasKeyChangeLock = true
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -184,21 +211,26 @@ fun ChatViewScreen(contact: ContactItem, onBack: () -> Unit) {
                 Text(contact.friendCode, fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
             }
 
-            Box {
-                Button(onClick = { expandedDropdown = true }) {
-                    val label = when (selectedTtl) {
-                        3600L -> "TTL: 1h"
-                        86400L -> "TTL: 24h"
-                        604800L -> "TTL: 7d"
-                        else -> "TTL: Off"
-                    }
-                    Text(label)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { triggerKeyChange() }) {
+                    Text("⚡ Test Key Change", fontSize = 11.sp)
                 }
-                DropdownMenu(expanded = expandedDropdown, onDismissRequest = { expandedDropdown = false }) {
-                    DropdownMenuItem(text = { Text("TTL: Off") }, onClick = { selectedTtl = 0L; expandedDropdown = false })
-                    DropdownMenuItem(text = { Text("TTL: 1 Hour") }, onClick = { selectedTtl = 3600L; expandedDropdown = false })
-                    DropdownMenuItem(text = { Text("TTL: 24 Hours") }, onClick = { selectedTtl = 86400L; expandedDropdown = false })
-                    DropdownMenuItem(text = { Text("TTL: 7 Days") }, onClick = { selectedTtl = 604800L; expandedDropdown = false })
+                Box {
+                    Button(onClick = { expandedDropdown = true }) {
+                        val label = when (selectedTtl) {
+                            3600L -> "TTL: 1h"
+                            86400L -> "TTL: 24h"
+                            604800L -> "TTL: 7d"
+                            else -> "TTL: Off"
+                        }
+                        Text(label)
+                    }
+                    DropdownMenu(expanded = expandedDropdown, onDismissRequest = { expandedDropdown = false }) {
+                        DropdownMenuItem(text = { Text("TTL: Off") }, onClick = { selectedTtl = 0L; expandedDropdown = false })
+                        DropdownMenuItem(text = { Text("TTL: 1 Hour") }, onClick = { selectedTtl = 3600L; expandedDropdown = false })
+                        DropdownMenuItem(text = { Text("TTL: 24 Hours") }, onClick = { selectedTtl = 86400L; expandedDropdown = false })
+                        DropdownMenuItem(text = { Text("TTL: 7 Days") }, onClick = { selectedTtl = 604800L; expandedDropdown = false })
+                    }
                 }
             }
         }
@@ -211,24 +243,43 @@ fun ChatViewScreen(contact: ContactItem, onBack: () -> Unit) {
             reverseLayout = false
         ) {
             items(messages) { msg ->
-                val alignment = if (msg.isMine) Alignment.End else Alignment.Start
-                val bgColor = if (msg.isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
-                val textColor = if (msg.isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
-
-                Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
+                if (msg.isSystemWarning) {
                     Box(
                         modifier = Modifier
-                            .background(bgColor, RoundedCornerShape(12.dp))
-                            .padding(12.dp)
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                            .background(androidx.compose.ui.graphics.Color(0xFF332005), RoundedCornerShape(12.dp))
+                            .clickable { showKeyChangeDialog = true }
+                            .padding(14.dp)
                     ) {
-                        Text(msg.text, color = textColor)
+                        Column {
+                            Text("SECURITY CODE CHANGED", fontWeight = FontWeight.Bold, color = androidx.compose.ui.graphics.Color(0xFFFFB74D), fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(msg.text, color = androidx.compose.ui.graphics.Color.White, fontSize = 13.sp)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Tap to verify or resolve →", color = androidx.compose.ui.graphics.Color(0xFF00D2B4), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
+                } else {
+                    val alignment = if (msg.isMine) Alignment.End else Alignment.Start
+                    val bgColor = if (msg.isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
+                    val textColor = if (msg.isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
+
+                    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
+                        Box(
+                            modifier = Modifier
+                                .background(bgColor, RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(msg.text, color = textColor)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
                 }
             }
         }
 
-        // Input bar
+        // Input bar (DISABLED while hasKeyChangeLock is true)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -239,10 +290,17 @@ fun ChatViewScreen(contact: ContactItem, onBack: () -> Unit) {
                 value = messageText,
                 onValueChange = { messageText = it },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Encrypted message...") }
+                enabled = !hasKeyChangeLock,
+                placeholder = {
+                    Text(
+                        if (hasKeyChangeLock) "🚫 Input disabled: Tap security warning above to verify"
+                        else "Encrypted message..."
+                    )
+                }
             )
             Spacer(modifier = Modifier.width(8.dp))
             Button(
+                enabled = !hasKeyChangeLock,
                 onClick = {
                     if (messageText.isNotBlank()) {
                         messages.add(
@@ -258,9 +316,70 @@ fun ChatViewScreen(contact: ContactItem, onBack: () -> Unit) {
                     }
                 }
             ) {
-                Text("Send 🚀")
+                Text(if (hasKeyChangeLock) "Blocked 🚫" else "Send 🚀")
             }
         }
+    }
+
+    if (showKeyChangeDialog) {
+        AlertDialog(
+            onDismissRequest = { showKeyChangeDialog = false },
+            title = { Text("Security Code Changed") },
+            text = {
+                Text(
+                    "The cryptographic identity for ${contact.nickname} has changed.\n\n" +
+                    "This could mean they reinstalled the app, or someone is intercepting your messages (Man-in-the-Middle attack).\n\n" +
+                    "Messaging is LOCKED until you resolve this warning."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    // Option A: Verification succeeded
+                    hasKeyChangeLock = false
+                    showKeyChangeDialog = false
+                }) {
+                    Text("Verify Again (Numbers Match)")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showKeyChangeDialog = false
+                    showAcceptWarningDialog = true
+                }) {
+                    Text("Accept New Key (Without Verification)", color = androidx.compose.ui.graphics.Color.Red)
+                }
+            }
+        )
+    }
+
+    if (showAcceptWarningDialog) {
+        AlertDialog(
+            onDismissRequest = { showAcceptWarningDialog = false },
+            title = { Text("Warning: Accept Without Verification?") },
+            text = {
+                Text(
+                    "You are accepting a new security code for ${contact.nickname} without verifying it.\n\n" +
+                    "If someone is intercepting your connection (MITM), they will be able to read and modify your messages.\n\n" +
+                    "Are you sure you want to proceed?"
+                )
+            },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.ui.graphics.Color.Red),
+                    onClick = {
+                        hasKeyChangeLock = false
+                        showAcceptWarningDialog = false
+                    }
+                ) {
+                    Text("Accept Without Verification")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAcceptWarningDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

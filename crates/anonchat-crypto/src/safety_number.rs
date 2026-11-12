@@ -59,6 +59,13 @@ impl ContactVerificationState {
         }
         true // Key matches
     }
+
+    /// Explicitly accepts a new identity key without verification (user accepts risk).
+    pub fn accept_new_key_without_verification(&mut self, new_remote_key_hex: &str, new_safety_number: &str) {
+        self.last_remote_key_hex = new_remote_key_hex.to_string();
+        self.safety_number = new_safety_number.to_string();
+        self.verified_at = None;
+    }
 }
 
 /// Derives a 30-digit fingerprint for an individual identity key and user identifier.

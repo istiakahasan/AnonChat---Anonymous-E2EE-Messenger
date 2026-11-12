@@ -136,10 +136,21 @@ struct ChatView: View {
     @State private var messageText = ""
     @State private var ttlHours = 24
     @State private var showSafetyNumber = false
+    @State private var hasKeyChangeLock = false
+    @State private var showKeyChangeDialog = false
+    @State private var showAcceptWarningConfirmation = false
     @State private var messages: [String] = [
         "Session verified. Traffic routed over Tor SOCKS5.",
         "Messages are padded to fixed 4KB blocks before encryption."
     ]
+
+    func triggerKeyChange() {
+        let warning = "⚠️ \(contactName)'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again."
+        if !messages.contains(warning) {
+            messages.append(warning)
+        }
+        hasKeyChangeLock = true
+    }
 
     var body: some View {
         VStack {
@@ -148,6 +159,12 @@ struct ChatView: View {
                 Button(action: { showSafetyNumber = true }) {
                     Label("Safety Code", systemImage: "checkmark.shield.fill")
                         .font(.caption)
+                }
+
+                Button(action: { triggerKeyChange() }) {
+                    Text("⚡ Test Key Change")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
                 }
 
                 Spacer()
@@ -171,41 +188,110 @@ struct ChatView: View {
 
             // Timeline
             ScrollView {
-                VStack(alignment: .trailing, spacing: 8) {
+                VStack(spacing: 8) {
                     ForEach(messages, id: \.self) { msg in
-                        HStack {
-                            Spacer()
-                            Text(msg)
+                        if msg.hasPrefix("⚠️") {
+                            // Persistent non-dismissable system message in chat
+                            Button(action: { showKeyChangeDialog = true }) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text("SECURITY CODE CHANGED")
+                                            .font(.caption)
+                                            .fontWeight(.bold)
+                                            .foregroundColor(.orange)
+                                        Spacer()
+                                    }
+                                    Text(msg)
+                                        .font(.subheadline)
+                                        .foregroundColor(.white)
+                                        .multilineTextAlignment(.leading)
+                                    HStack {
+                                        Text("Tap to verify or resolve →")
+                                            .font(.caption)
+                                            .fontWeight(.bold)
+                                            .foregroundColor(Color(red: 0.0, green: 0.82, blue: 0.71))
+                                        Spacer()
+                                    }
+                                }
                                 .padding(12)
-                                .background(Color(red: 0.0, green: 0.35, blue: 0.55))
-                                .foregroundColor(.white)
-                                .cornerRadius(14)
+                                .background(Color(red: 0.25, green: 0.12, blue: 0.0))
+                                .cornerRadius(12)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(Color.orange, lineWidth: 1.5)
+                                )
+                            }
+                            .padding(.vertical, 4)
+                        } else {
+                            HStack {
+                                Spacer()
+                                Text(msg)
+                                    .padding(12)
+                                    .background(Color(red: 0.0, green: 0.35, blue: 0.55))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(14)
+                            }
                         }
                     }
                 }
                 .padding()
             }
 
-            // Input Bar
+            // Input Bar (DISABLED while hasKeyChangeLock is true)
             HStack {
-                TextField("Encrypted message...", text: $messageText)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                TextField(
+                    hasKeyChangeLock
+                        ? "🚫 Input disabled: Tap security warning above to verify"
+                        : "Encrypted message...",
+                    text: $messageText
+                )
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+                .disabled(hasKeyChangeLock)
 
                 Button(action: {
-                    if !messageText.isEmpty {
+                    if !messageText.isEmpty && !hasKeyChangeLock {
                         messages.append(messageText)
                         messageText = ""
                     }
                 }) {
-                    Image(systemName: "paperplane.fill")
-                        .foregroundColor(Color(red: 0.0, green: 0.82, blue: 0.71))
+                    Image(systemName: hasKeyChangeLock ? "lock.fill" : "paperplane.fill")
+                        .foregroundColor(hasKeyChangeLock ? .red : Color(red: 0.0, green: 0.82, blue: 0.71))
                 }
+                .disabled(hasKeyChangeLock)
             }
             .padding()
         }
         .navigationTitle(contactName)
         .sheet(isPresented: $showSafetyNumber) {
             SafetyNumberView(contactName: contactName, contactUserId: contactUserId)
+        }
+        .confirmationDialog(
+            "Security Code Changed",
+            isPresented: $showKeyChangeDialog,
+            titleVisibility: .visible
+        ) {
+            Button("Verify Again (Numbers Match)") {
+                // Option A: Verification succeeded
+                hasKeyChangeLock = false
+            }
+            Button("Accept New Key (Without Verification)", role: .destructive) {
+                showAcceptWarningConfirmation = true
+            }
+            Button("Keep Blocked", role: .cancel) {}
+        } message: {
+            Text("\(contactName)'s cryptographic identity key has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Outbound transmission is LOCKED.")
+        }
+        .alert(
+            "Security Warning: Accept Without Verification?",
+            isPresented: $showAcceptWarningConfirmation
+        ) {
+            Button("Accept Without Verification", role: .destructive) {
+                // Option B: User explicitly accepts risk
+                hasKeyChangeLock = false
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You are accepting a new security code for \(contactName) without verification. If an attacker is intercepting your connection, they will be able to read and modify your messages.")
         }
     }
 }

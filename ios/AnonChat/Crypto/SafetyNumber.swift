@@ -81,5 +81,29 @@ public class SafetyNumber {
 
         return groups.joined(separator: " ")
     }
+
+    /// Checks remote identity key against stored lastRemoteKey.
+    public static func checkKeyChanged(currentKeyHex: String, storedRecord: VerificationRecord?) -> Bool {
+        guard let record = storedRecord else { return false }
+        return record.lastRemoteKeyHex != currentKeyHex
+    }
+
+    /// Step 1: Set verifiedAt = nil in local storage when identity key change is detected.
+    public static func resetVerification(record: inout VerificationRecord, newKeyHex: String? = nil) {
+        record.verifiedAt = nil
+        if let newKey = newKeyHex {
+            record.lastRemoteKeyHex = newKey
+        }
+    }
+
+    /// Explicitly accepts a new identity key without verification.
+    public static func acceptNewKeyWithoutVerification(contactId: String, newKeyHex: String, safetyNumber: String) -> VerificationRecord {
+        return VerificationRecord(
+            contactId: contactId,
+            safetyNumber: safetyNumber,
+            verifiedAt: nil,
+            lastRemoteKeyHex: newKeyHex
+        )
+    }
 }
 

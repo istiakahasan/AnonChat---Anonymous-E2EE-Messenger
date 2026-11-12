@@ -183,5 +183,36 @@ export class SafetyNumberService {
       await this.saveVerificationState(state);
     }
   }
+
+  /**
+   * Resets verification state to unverified (verifiedAt = null) when an identity key change is detected.
+   */
+  static async resetVerification(contactId: string, newRemoteKeyHex?: string): Promise<void> {
+    const state = await this.getVerificationState(contactId);
+    if (state) {
+      state.verifiedAt = null; // Step 1: Set verifiedAt = null in local storage
+      if (newRemoteKeyHex) {
+        state.lastRemoteKey = newRemoteKeyHex;
+      }
+      await this.saveVerificationState(state);
+    }
+  }
+
+  /**
+   * Explicitly accepts a new identity key without verification (user accepts risk).
+   */
+  static async acceptNewKeyWithoutVerification(
+    contactId: string,
+    newRemoteKeyHex: string,
+    newSafetyNumber?: string
+  ): Promise<void> {
+    const record: ContactVerificationRecord = {
+      contactId,
+      safetyNumber: newSafetyNumber || (await this.getVerificationState(contactId))?.safetyNumber || '',
+      verifiedAt: null, // Remains unverified, but key change alert is cleared
+      lastRemoteKey: newRemoteKeyHex,
+    };
+    await this.saveVerificationState(record);
+  }
 }
 

@@ -13,6 +13,7 @@ class ChatMessage {
   final String text;
   final bool isMine;
   final bool isSealedSender;
+  final bool isSystemWarning;
   final DateTime timestamp;
 
   ChatMessage({
@@ -21,6 +22,7 @@ class ChatMessage {
     required this.text,
     required this.isMine,
     this.isSealedSender = false,
+    this.isSystemWarning = false,
     required this.timestamp,
   });
 }
@@ -55,6 +57,11 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
   bool _isReady = false;
   bool _useSealedSender = false;
   bool _isVerified = false;
+
+  // Key change detection lock: strictly disables message input field when active
+  bool _hasKeyChangeLock = false;
+  String? _pendingNewKeyHex;
+
   final List<ChatMessage> _messages = [];
 
   // Deterministic 60-digit safety number for this peer session
@@ -104,11 +111,65 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
     }
   }
 
+  /**
+   * KEY CHANGE DETECTION LOGIC:
+   * On every incoming message or session update, if identity key has changed:
+   * 1. Set verifiedAt = null in local storage.
+   * 2. Insert persistent, non-dismissable system message in the chat:
+   *    "⚠️ [Contact Name]'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again."
+   * 3. DISABLE the message input field for that chat until the user resolves the warning.
+   */
+  Future<void> _triggerKeyChangeDetected({String? newKeyHex}) async {
+    // 1. Set verifiedAt = null in local storage
+    await SafetyNumberService.resetVerification(widget.contactName, newKeyHex);
+
+    final warningText =
+        "⚠️ ${widget.contactName}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.";
+
+    setState(() {
+      _isVerified = false;
+      _hasKeyChangeLock = true;
+      _pendingNewKeyHex = newKeyHex ?? 'F9E8D7C6B5A43210F9E8D7C6B5A43210F9E8D7C6B5A43210F9E8D7C6B5A43210';
+
+      // 2. Insert persistent system message into chat
+      if (!_messages.any((m) => m.isSystemWarning && m.text == warningText)) {
+        _messages.add(
+          ChatMessage(
+            id: 'keychange_${DateTime.now().millisecondsSinceEpoch}',
+            sender: 'System',
+            text: warningText,
+            isMine: false,
+            isSystemWarning: true,
+            timestamp: DateTime.now(),
+          ),
+        );
+      }
+    });
+  }
+
   Future<void> _sendMessage() async {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
 
-    // Strict security check: Outbound transmission is blocked on mismatch
+    // Strict security check 1: Input locked due to key change
+    if (_hasKeyChangeLock) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.orange.shade900,
+          content: Text(
+            "${widget.contactName}'s security code has changed. Tap the warning message above to verify.",
+          ),
+          action: SnackBarAction(
+            label: 'Resolve',
+            textColor: Colors.tealAccent,
+            onPressed: _showKeyChangeResolutionDialog,
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Strict security check 2: Outbound transmission blocked on mismatch
     if (_mismatch != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -143,7 +204,8 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
         _textController.clear();
       });
     } on KeyChangeException catch (e) {
-      _showKeyChangeDialog(e);
+      await _triggerKeyChangeDetected(newKeyHex: e.newFingerprint);
+      _showKeyChangeResolutionDialog();
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Encryption error: $e')),
@@ -163,6 +225,7 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
             setState(() {
               _isVerified = true;
               _mismatch = null;
+              _hasKeyChangeLock = false; // Unlocks input field!
             });
           },
         ),
@@ -182,6 +245,7 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
             setState(() {
               _isVerified = true;
               _mismatch = null;
+              _hasKeyChangeLock = false; // Unlocks input field!
             });
           },
           onSwitchToDisplay: () {
@@ -199,6 +263,145 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
             });
           },
         ),
+      ),
+    );
+  }
+
+  /// Resolution Dialog for Key Change Warning
+  void _showKeyChangeResolutionDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Security Code Changed',
+                style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "The cryptographic identity for ${widget.contactName} has changed.\n\n"
+              "This could mean they reinstalled the app, or someone is intercepting your messages (Man-in-the-Middle attack).\n\n"
+              "Outbound message input is LOCKED until you resolve this warning.",
+              style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.verified, color: Colors.black),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D2B4),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _openScanScreen();
+                },
+                label: const Text(
+                  'Verify Again (Safety Number Match)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.gpp_maybe, color: Colors.redAccent, size: 18),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _promptConfirmAcceptNewKeyWithoutVerification();
+                },
+                label: const Text(
+                  'Accept New Key (Without Verification)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Keep Blocked (Cancel)', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Resolution Choice B: Explicit Acceptance with Security Warning
+  void _promptConfirmAcceptNewKeyWithoutVerification() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Row(
+          children: [
+            Icon(Icons.shield_outlined, color: Colors.redAccent),
+            SizedBox(width: 8),
+            Text('Security Warning', style: TextStyle(color: Colors.redAccent)),
+          ],
+        ),
+        content: Text(
+          "You are accepting a new security code for ${widget.contactName} WITHOUT verifying it.\n\n"
+          "If an attacker or rogue server is intercepting your connection, they will be able to read and modify your messages.\n\n"
+          "Are you sure you want to trust this unverified key?",
+          style: const TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              if (_pendingNewKeyHex != null) {
+                await SafetyNumberService.acceptNewKeyWithoutVerification(
+                  widget.contactName,
+                  _pendingNewKeyHex!,
+                );
+              }
+              Navigator.pop(ctx);
+              setState(() {
+                _hasKeyChangeLock = false; // UNLOCKS message input field!
+              });
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: Colors.orange.shade800,
+                    content: Text(
+                      "New key for ${widget.contactName} accepted without verification. Input field unlocked.",
+                    ),
+                  ),
+                );
+              }
+            },
+            child: const Text('Accept Without Verification', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
       ),
     );
   }
@@ -347,66 +550,10 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
     );
   }
 
-  void _showKeyChangeDialog(KeyChangeException e) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1E1E),
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.orange),
-            SizedBox(width: 8),
-            Text('Safety Code Changed', style: TextStyle(color: Colors.orange)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'The cryptographic identity for ${e.contactName} has changed. '
-              'This may indicate a device reinstall or an active Man-in-the-Middle attack.',
-              style: const TextStyle(color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
-            const Text('Previous Safety Code:', style: TextStyle(color: Colors.grey, fontSize: 12)),
-            Text(
-              e.oldFingerprint.length > 24 ? '${e.oldFingerprint.substring(0, 24)}...' : e.oldFingerprint,
-              style: const TextStyle(fontFamily: 'monospace', color: Colors.white),
-            ),
-            const SizedBox(height: 8),
-            const Text('New Safety Code:', style: TextStyle(color: Colors.grey, fontSize: 12)),
-            Text(
-              e.newFingerprint.length > 24 ? '${e.newFingerprint.substring(0, 24)}...' : e.newFingerprint,
-              style: const TextStyle(fontFamily: 'monospace', color: Colors.orangeAccent),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Block & Abort', style: TextStyle(color: Colors.redAccent)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-            onPressed: () async {
-              await _signal.approveContactKeyChange(
-                contactName: e.contactName,
-                newFingerprint: e.newFingerprint,
-              );
-              Navigator.pop(ctx);
-              _sendMessage();
-            },
-            child: const Text('Trust New Code'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
+    final isInputDisabled = _hasKeyChangeLock || _mismatch != null;
+
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
@@ -454,6 +601,11 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
             icon: const Icon(Icons.qr_code_scanner, color: Color(0xFF00D2B4)),
             tooltip: 'Scan Safety Number QR',
             onPressed: _openScanScreen,
+          ),
+          IconButton(
+            icon: const Icon(Icons.flash_on, color: Colors.orangeAccent),
+            tooltip: 'Simulate Key Change',
+            onPressed: () => _triggerKeyChangeDetected(),
           ),
           Row(
             children: [
@@ -547,6 +699,63 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
               itemCount: _messages.length,
               itemBuilder: (ctx, i) {
                 final msg = _messages[i];
+
+                // Render persistent non-dismissable system warning message
+                if (msg.isSystemWarning) {
+                  return GestureDetector(
+                    onTap: _showKeyChangeResolutionDialog,
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(vertical: 8),
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.15),
+                        border: Border.all(color: Colors.orange, width: 1.5),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 20),
+                              SizedBox(width: 8),
+                              Text(
+                                'SECURITY CODE CHANGED',
+                                style: TextStyle(
+                                  color: Colors.orange,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            msg.text,
+                            style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.3),
+                          ),
+                          const SizedBox(height: 8),
+                          const Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                'Tap to verify or resolve →',
+                                style: TextStyle(
+                                  color: Color(0xFF00D2B4),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Icon(Icons.arrow_forward, color: Color(0xFF00D2B4), size: 14),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+
                 return Align(
                   alignment: msg.isMine ? Alignment.centerRight : Alignment.centerLeft,
                   child: Container(
@@ -582,7 +791,7 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
             ),
           ),
 
-          // Message input bar
+          // Message input bar (DISABLED while _hasKeyChangeLock or _mismatch is active)
           Container(
             padding: const EdgeInsets.all(12),
             color: const Color(0xFF1E1E1E),
@@ -591,22 +800,24 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
                 Expanded(
                   child: TextField(
                     controller: _textController,
-                    enabled: _mismatch == null,
+                    enabled: !isInputDisabled,
                     style: const TextStyle(color: Colors.white),
                     decoration: InputDecoration(
-                      hintText: _mismatch != null
-                          ? '🚫 Transmission blocked: Safety Number mismatch'
-                          : (_useSealedSender
-                              ? 'Send anonymous sealed message...'
-                              : 'Send end-to-end encrypted message...'),
+                      hintText: _hasKeyChangeLock
+                          ? '🚫 Input disabled: Tap security warning above to verify'
+                          : (_mismatch != null
+                              ? '🚫 Transmission blocked: Safety Number mismatch'
+                              : (_useSealedSender
+                                  ? 'Send anonymous sealed message...'
+                                  : 'Send end-to-end encrypted message...')),
                       hintStyle: TextStyle(
-                        color: _mismatch != null ? const Color(0xFFFF8A80) : Colors.grey,
+                        color: isInputDisabled ? const Color(0xFFFF8A80) : Colors.grey,
                       ),
                       filled: true,
-                      fillColor: _mismatch != null ? const Color(0xFF3E2723) : const Color(0xFF2A2A2A),
+                      fillColor: isInputDisabled ? const Color(0xFF3E2723) : const Color(0xFF2A2A2A),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
-                        borderSide: _mismatch != null
+                        borderSide: isInputDisabled
                             ? const BorderSide(color: Color(0xFFD32F2F))
                             : BorderSide.none,
                       ),
@@ -616,10 +827,10 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
                 ),
                 const SizedBox(width: 8),
                 IconButton(
-                  onPressed: _sendMessage,
+                  onPressed: isInputDisabled ? _showKeyChangeResolutionDialog : _sendMessage,
                   icon: Icon(
-                    _mismatch != null ? Icons.block : Icons.send_rounded,
-                    color: _mismatch != null ? Colors.redAccent : const Color(0xFF00D2B4),
+                    isInputDisabled ? Icons.block : Icons.send_rounded,
+                    color: isInputDisabled ? Colors.redAccent : const Color(0xFF00D2B4),
                   ),
                 ),
               ],

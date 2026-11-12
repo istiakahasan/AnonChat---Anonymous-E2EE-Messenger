@@ -88,6 +88,11 @@ pub struct AnonChatApp {
     pub show_verify_confirm_modal: bool,
     pub active_safety_number: String,
     pub is_contact_verified: bool,
+
+    // Key Change Lock State (Disables message input until resolved)
+    pub has_key_change_lock: bool,
+    pub show_key_change_dialog: bool,
+    pub show_accept_warning_modal: bool,
 }
 
 impl AnonChatApp {
@@ -126,6 +131,9 @@ impl AnonChatApp {
             show_verify_confirm_modal: false,
             active_safety_number: "01253 50845 24195 94956 74245 78302 94668 80872 76692 21188 60314 51512".into(),
             is_contact_verified: false,
+            has_key_change_lock: false,
+            show_key_change_dialog: false,
+            show_accept_warning_modal: false,
         }
     }
 }
@@ -297,6 +305,28 @@ impl AnonChatApp {
                         if ui.button("🛡️ Verify Safety Code").clicked() {
                             self.show_safety_number_dialog = true;
                         }
+
+                        // Test Key Change Trigger
+                        if ui.small_button("⚡ Test Key Change").clicked() {
+                            let nickname = contact.nickname.clone();
+                            let warning = format!(
+                                "⚠️ {}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.",
+                                nickname
+                            );
+                            if !self.messages.iter().any(|m| m.plaintext == warning) {
+                                self.messages.push(StoredMessage {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    conversation_id: contact.user_id.clone(),
+                                    sender_id: "system".into(),
+                                    is_mine: false,
+                                    plaintext: warning,
+                                    timestamp: Utc::now().timestamp(),
+                                    expires_at: None,
+                                });
+                            }
+                            self.has_key_change_lock = true;
+                            self.is_contact_verified = false;
+                        }
                     });
                 });
                 ui.separator();
@@ -306,47 +336,77 @@ impl AnonChatApp {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for msg in &self.messages {
-                            ui.horizontal(|ui| {
-                                if msg.is_mine {
-                                    ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
-                                        egui::Frame::none()
-                                            .fill(Color32::from_rgb(0, 90, 140))
-                                            .rounding(Rounding::same(8.0))
-                                            .inner_margin(8.0)
-                                            .show(ui, |ui| {
-                                                ui.label(RichText::new(&msg.plaintext).color(Color32::WHITE));
+                            if msg.plaintext.starts_with("⚠️ ") {
+                                // Persistent non-dismissable system warning message
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(45, 25, 0))
+                                    .stroke(Stroke::new(1.5, Color32::from_rgb(255, 152, 0)))
+                                    .rounding(Rounding::same(8.0))
+                                    .inner_margin(12.0)
+                                    .show(ui, |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new("SECURITY CODE CHANGED").strong().color(Color32::from_rgb(255, 183, 77)).size(12.0));
+                                            ui.add_space(4.0);
+                                            ui.label(RichText::new(&msg.plaintext).color(Color32::WHITE).size(13.0));
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                if ui.button(RichText::new("Tap to verify or resolve →").strong().color(Color32::from_rgb(0, 210, 180))).clicked() {
+                                                    self.show_key_change_dialog = true;
+                                                }
                                             });
+                                        });
                                     });
-                                } else {
-                                    ui.with_layout(Layout::left_to_right(egui::Align::TOP), |ui| {
-                                        egui::Frame::none()
-                                            .fill(Color32::from_rgb(45, 45, 48))
-                                            .rounding(Rounding::same(8.0))
-                                            .inner_margin(8.0)
-                                            .show(ui, |ui| {
-                                                ui.label(RichText::new(&msg.plaintext).color(Color32::WHITE));
-                                            });
-                                    });
-                                }
-                            });
-                            ui.add_space(4.0);
+                                ui.add_space(6.0);
+                            } else {
+                                ui.horizontal(|ui| {
+                                    if msg.is_mine {
+                                        ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
+                                            egui::Frame::none()
+                                                .fill(Color32::from_rgb(0, 90, 140))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(8.0)
+                                                .show(ui, |ui| {
+                                                    ui.label(RichText::new(&msg.plaintext).color(Color32::WHITE));
+                                                });
+                                        });
+                                    } else {
+                                        ui.with_layout(Layout::left_to_right(egui::Align::TOP), |ui| {
+                                            egui::Frame::none()
+                                                .fill(Color32::from_rgb(45, 45, 48))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(8.0)
+                                                .show(ui, |ui| {
+                                                    ui.label(RichText::new(&msg.plaintext).color(Color32::WHITE));
+                                                });
+                                        });
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            }
                         }
                     });
 
                 ui.separator();
 
-                // Input Field & Send Button
+                // Input Field & Send Button (DISABLED while has_key_change_lock is true)
                 ui.horizontal(|ui| {
-                    let response = ui.add(
+                    let hint = if self.has_key_change_lock {
+                        "🚫 Input disabled: Tap security warning above to verify"
+                    } else {
+                        "Type an end-to-end encrypted message..."
+                    };
+
+                    let response = ui.add_enabled(
+                        !self.has_key_change_lock,
                         egui::TextEdit::singleline(&mut self.message_input)
-                            .hint_text("Type an end-to-end encrypted message...")
+                            .hint_text(hint)
                             .desired_width(ui.available_width() - 80.0),
                     );
 
-                    let send_clicked = ui.button("Send 🚀").clicked();
+                    let send_clicked = ui.add_enabled(!self.has_key_change_lock, egui::Button::new(if self.has_key_change_lock { "Blocked 🚫" } else { "Send 🚀" })).clicked();
                     let enter_pressed = response.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
-                    if (send_clicked || enter_pressed) && !self.message_input.trim().is_empty() {
+                    if !self.has_key_change_lock && (send_clicked || enter_pressed) && !self.message_input.trim().is_empty() {
                         let text = self.message_input.trim().to_string();
                         self.messages.push(StoredMessage {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -490,8 +550,79 @@ impl AnonChatApp {
                             }
                             if ui.button(RichText::new("Yes, they match").strong().color(Color32::from_rgb(0, 210, 180))).clicked() {
                                 self.is_contact_verified = true;
+                                self.has_key_change_lock = false;
                                 self.show_verify_confirm_modal = false;
                                 self.show_safety_number_dialog = false;
+                            }
+                        });
+                    });
+            }
+        }
+
+        // Key Change Resolution Window
+        if self.show_key_change_dialog {
+            if let Some(ref contact) = self.selected_contact {
+                let nickname = contact.nickname.clone();
+                egui::Window::new("Security Code Changed")
+                    .collapsible(false)
+                    .resizable(false)
+                    .min_width(400.0)
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new(format!(
+                            "The cryptographic identity key for {} has changed.\n\n\
+                            This could mean they reinstalled the app, switched devices, or someone is intercepting your messages (Man-in-the-Middle attack).\n\n\
+                            Outbound messaging is LOCKED until resolved.",
+                            nickname
+                        )).color(Color32::from_rgb(240, 240, 240)));
+
+                        ui.add_space(14.0);
+
+                        // Option A: Verify again
+                        if ui.button(RichText::new("✓ Verify Again (Safety Number Match)").strong().color(Color32::from_rgb(0, 210, 180))).clicked() {
+                            self.show_key_change_dialog = false;
+                            self.show_safety_number_dialog = true;
+                        }
+
+                        ui.add_space(8.0);
+
+                        // Option B: Accept without verification
+                        if ui.button(RichText::new("⚠️ Accept New Key (Without Verification)").strong().color(Color32::from_rgb(255, 82, 82))).clicked() {
+                            self.show_key_change_dialog = false;
+                            self.show_accept_warning_modal = true;
+                        }
+
+                        ui.add_space(8.0);
+                        if ui.button("Keep Blocked (Cancel)").clicked() {
+                            self.show_key_change_dialog = false;
+                        }
+                    });
+            }
+        }
+
+        // Explicit Accept Without Verification Warning Dialog
+        if self.show_accept_warning_modal {
+            if let Some(ref contact) = self.selected_contact {
+                let nickname = contact.nickname.clone();
+                egui::Window::new("Security Warning: Accept Without Verification?")
+                    .collapsible(false)
+                    .resizable(false)
+                    .min_width(380.0)
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new(format!(
+                            "You are accepting a new security code for {} WITHOUT verifying it.\n\n\
+                            If someone is intercepting your connection (MITM), they will be able to read and modify your messages.\n\n\
+                            Are you sure you want to proceed?",
+                            nickname
+                        )).color(Color32::from_rgb(255, 183, 77)));
+
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                self.show_accept_warning_modal = false;
+                            }
+                            if ui.button(RichText::new("Accept Without Verification").strong().color(Color32::RED)).clicked() {
+                                self.has_key_change_lock = false; // Unlocks message input!
+                                self.show_accept_warning_modal = false;
                             }
                         });
                     });

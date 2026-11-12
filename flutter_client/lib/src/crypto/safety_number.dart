@@ -180,5 +180,35 @@ class SafetyNumberService {
       await saveVerificationState(updated);
     }
   }
+
+  /// Step 1: Set verifiedAt = null in local storage when identity key change is detected
+  static Future<void> resetVerification(String contactId, [String? newRemoteKeyHex]) async {
+    final existing = await getVerificationState(contactId);
+    if (existing != null) {
+      final updated = ContactVerificationRecord(
+        contactId: existing.contactId,
+        safetyNumber: existing.safetyNumber,
+        verifiedAt: null, // Reset verification
+        lastRemoteKeyHex: newRemoteKeyHex ?? existing.lastRemoteKeyHex,
+      );
+      await saveVerificationState(updated);
+    }
+  }
+
+  /// Explicitly accepts a new identity key without verification (user accepts risk)
+  static Future<void> acceptNewKeyWithoutVerification(
+    String contactId,
+    String newRemoteKeyHex, [
+    String? newSafetyNumber,
+  ]) async {
+    final existing = await getVerificationState(contactId);
+    final updated = ContactVerificationRecord(
+      contactId: contactId,
+      safetyNumber: newSafetyNumber ?? existing?.safetyNumber ?? '',
+      verifiedAt: null, // Remains unverified
+      lastRemoteKeyHex: newRemoteKeyHex,
+    );
+    await saveVerificationState(updated);
+  }
 }
 
