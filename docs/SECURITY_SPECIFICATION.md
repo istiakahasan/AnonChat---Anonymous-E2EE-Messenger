@@ -296,7 +296,61 @@ Upon receiving and authenticating Alice's first message envelope:
    - Header JSON is serialized and bound as AES-256-GCM **Additional Authenticated Data (AAD)**.
    - Ciphertext output includes 16-byte GCM authentication tag appended at the end.
 
-### 5.10 Sub-Step 4.3: Decrypt a Message (Receiver Path)
+---
+
+### 5.10 Sub-Step SM.2: Message Key Uniqueness Enforcement
+
+#### The Rule
+Every message (encrypt or decrypt) must use a fresh message key ($MK$) derived from the current chain key ($CK$). The chain key advances after every single message. **No message key is ever reused under any circumstances.**
+
+#### 1. Encryption Path
+```rust
+// Derive new chain key and message key
+let (new_cks, mut mk) = kdf_ck(&state.CKs);
+state.CKs = new_cks;
+
+// Use mk for AES-GCM, then zeroize it immediately
+let ciphertext = encrypt_aes_gcm(&mk, &nonce, plaintext, &aad)?;
+mk.zeroize();
+
+state.Ns += 1;
+```
+
+- **Forward Secrecy**: Once a message key encrypts a payload, it is zeroized from memory. The previous chain key is overwritten with $\text{CKs}_{\text{new}}$, ensuring that past message keys can never be re-derived.
+- **Nonce/Key Disjointness**: Because $MK$ advances unconditionally on every message, identical plaintexts encrypted consecutively produce completely different message keys and ciphertexts ($C_1 \ne C_2$).
+
+#### 2. Decryption Path & Replay Prevention
+```rust
+// 1. Check skipped keys (out-of-order handling)
+if let Some(mk_secret) = state.skipped_message_keys.remove(&skipped_key) {
+    let mut mk = mk_secret.expose_secret().0;
+    let pt = decrypt_aes_gcm(&mk, &nonce, &ciphertext, &aad)?;
+    mk.zeroize();
+    return Ok(pt);
+}
+
+// 2. Reject already-consumed / replayed messages
+if !is_new_dh && header.n < state.Nr {
+    return Err(RatchetError::DuplicateOrOldMessage);
+}
+
+// 3. Derive new receiving chain key and message key
+let (new_ckr, mut mk) = kdf_ck(&state.CKr);
+state.CKr = new_ckr;
+state.Nr += 1;
+
+let pt = decrypt_aes_gcm(&mk, &nonce, &ciphertext, &aad)?;
+mk.zeroize();
+return Ok(pt);
+```
+
+- **One-Time Consumption**: When a message key is consumed from `MKSKIPPED`, it is deleted from the table (`remove`). Replaying the same packet will fail immediately.
+- **Old Message Rejection**: If an incoming message in the active receiving chain has an index $n < N_r$ and is not present in `MKSKIPPED`, it is rejected immediately with `DuplicateOrOldMessage`, preventing duplicate key derivation.
+- **AES-GCM Authentication Security**: Reusing an AES-GCM key with the same nonce is catastrophic (enables polynomial hash authentication key recovery). Advancing the message key per packet eliminates any possibility of key-nonce pair collisions.
+
+---
+
+### 5.11 Sub-Step 4.3: Decrypt a Message (Receiver Path)
 
 #### Per-Message Decryption Algorithm:
 Inputs: `(header, nonce, ciphertext)`

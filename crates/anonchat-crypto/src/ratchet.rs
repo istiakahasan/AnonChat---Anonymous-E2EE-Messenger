@@ -60,6 +60,8 @@ pub enum RatchetError {
     InvalidNonceLength(usize),
     #[error("Invalid ciphertext: expected at least 16 bytes")]
     InvalidCiphertext,
+    #[error("Duplicate or already-consumed message: message key cannot be reused")]
+    DuplicateOrOldMessage,
 }
 
 /// Message header sent in the clear alongside the ciphertext.
@@ -436,7 +438,7 @@ impl RatchetSession {
             .ok_err(|| RatchetError::MissingSendingChain)?;
 
         // 2. Derive next chain key and message key: CKs_new, MK = KDF_CK(CKs)
-        let (next_cks, mk) = kdf_ck(cks_secret.expose_secret().0);
+        let (next_cks, mut mk) = kdf_ck(cks_secret.expose_secret().0);
         self.sending_chain_key = Some(Secret::new(SecretBytes32(next_cks)));
 
         // 3. Generate a random 12-byte nonce for AES-256-GCM
@@ -455,7 +457,10 @@ impl RatchetSession {
         // Header authenticated via AAD
         let aad = serde_json::to_vec(&header)?;
 
+        // Sub-Step SM.2: Message Key Uniqueness Enforcement:
+        // Use mk for AES-GCM, then zeroize it immediately
         let ciphertext = encrypt_aes_gcm(&mk, &nonce, plaintext, &aad)?;
+        mk.zeroize();
 
         Ok(EncryptedEnvelope {
             v: 1,
@@ -525,6 +530,11 @@ impl RatchetSession {
             // b. Perform DH ratchet step (Sub-Step 4.4)
             self.dh_ratchet(&peer_dh_public)?;
             self.bob_first_message = false;
+        } else if envelope.header.n < self.nr {
+            // Sub-Step SM.2: Enforce message key uniqueness.
+            // If the message number has already been passed in this receiving chain and was not
+            // in skipped_message_keys, it has already been consumed. Reusing message keys is forbidden.
+            return Err(RatchetError::DuplicateOrOldMessage);
         }
 
         // 3. Skip message keys in the current receiving chain up to header.n
@@ -942,6 +952,55 @@ mod tests {
 
         let err = decrypt(&mut bob, &malicious_header, &dummy_ct, &dummy_nonce);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_sub_step_sm2_message_key_uniqueness_enforcement() {
+        let shared_secret = [0x99u8; 32];
+        let bob_kp = RatchetKeyPair::generate();
+        let mut alice = init_sender_state(&shared_secret, bob_kp.public.as_bytes()).unwrap();
+        let mut bob = init_receiver_state(&shared_secret, bob_kp);
+
+        // 1. Encrypt two identical plaintexts
+        let plaintext = b"Identical plaintext payload";
+        let cks_before_1 = alice.sending_chain_key.as_ref().unwrap().expose_secret().0;
+        let (h1, ct1) = encrypt(&mut alice, plaintext, b"").unwrap();
+        let cks_after_1 = alice.sending_chain_key.as_ref().unwrap().expose_secret().0;
+
+        assert_ne!(cks_before_1, cks_after_1, "Sending chain key must advance after every message");
+        assert_eq!(h1.n, 0);
+
+        let (h2, ct2) = encrypt(&mut alice, plaintext, b"").unwrap();
+        let cks_after_2 = alice.sending_chain_key.as_ref().unwrap().expose_secret().0;
+        assert_ne!(cks_after_1, cks_after_2, "Sending chain key must advance on second message");
+        assert_eq!(h2.n, 1);
+
+        // Ciphertexts of identical plaintexts must differ due to unique fresh message keys and nonces
+        assert_ne!(ct1, ct2, "Message key uniqueness: identical plaintexts must produce distinct ciphertexts");
+
+        // 2. Decrypt both messages sequentially
+        let pt1 = decrypt(&mut bob, &h1, &ct1, b"").unwrap();
+        assert_eq!(pt1, plaintext);
+        assert_eq!(bob.nr, 1);
+
+        let pt2 = decrypt(&mut bob, &h2, &ct2, b"").unwrap();
+        assert_eq!(pt2, plaintext);
+        assert_eq!(bob.nr, 2);
+
+        // 3. Replay attack prevention: Attempting to decrypt message 1 again MUST fail
+        // Reusing an already-consumed message key is strictly forbidden
+        let replay_err = decrypt(&mut bob, &h1, &ct1, b"");
+        match replay_err {
+            Err(RatchetError::DuplicateOrOldMessage) => {}
+            other => panic!("Expected DuplicateOrOldMessage error on replaying consumed message, got: {:?}", other),
+        }
+
+        // 4. Also replaying message 2 must fail
+        let replay_err_2 = decrypt(&mut bob, &h2, &ct2, b"");
+        match replay_err_2 {
+            Err(RatchetError::DuplicateOrOldMessage) => {}
+            other => panic!("Expected DuplicateOrOldMessage error on replaying consumed message 2, got: {:?}", other),
+        }
     }
 }
 

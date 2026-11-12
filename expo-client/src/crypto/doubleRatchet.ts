@@ -740,6 +740,9 @@ export async function ratchetDecrypt(
       state.Ns = 0;
       state.Nr = 0;
     }
+  } else if (header.n < state.Nr) {
+    // Sub-Step SM.2: Enforce message key uniqueness
+    throw new Error('Duplicate or already-consumed message: message key cannot be reused');
   }
 
   // 3. Skip messages in the new chain up to header.n

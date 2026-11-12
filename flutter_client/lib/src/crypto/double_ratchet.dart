@@ -440,6 +440,9 @@ class DoubleRatchetSession {
       _skipMessageKeys(pn);
       _dhRatchet(peerDhBytes);
       bobFirstMessage = false;
+    } else if (n < nr) {
+      // Sub-Step SM.2: Enforce message key uniqueness
+      throw StateError('Duplicate or already-consumed message: message key cannot be reused');
     }
 
     // 3. Skip message keys in the current receiving chain up to header.n

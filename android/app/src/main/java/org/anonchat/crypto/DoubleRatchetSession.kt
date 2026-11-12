@@ -252,6 +252,9 @@ class DoubleRatchetSession private constructor(
             skipMessageKeys(envelope.header.pn)
             dhRatchet(peerDhPublic)
             bobFirstMessage = false
+        } else if (envelope.header.n < nr) {
+            // Sub-Step SM.2: Enforce message key uniqueness
+            throw IllegalStateException("Duplicate or already-consumed message: message key cannot be reused")
         }
 
         skipMessageKeys(envelope.header.n)

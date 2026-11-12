@@ -641,6 +641,9 @@ class DoubleRatchetSession:
             self._skip_keys(header["pn"])
             self._dh_ratchet(peer_dh)
             self.bob_first_message = False
+        elif header["n"] < self.nr:
+            # Sub-Step SM.2: Enforce message key uniqueness
+            raise ValueError("Duplicate or already-consumed message: message key cannot be reused")
 
         self._skip_keys(header["n"])
         self.ckr, mk = kdf_ck(self.ckr)
@@ -2141,7 +2144,16 @@ def run_all_tests():
     assert h_c2a["n"] == 1 and h_c2b["n"] == 2
     decrypt(bob_chk, h_c2a, ct_c2a, b"")
     decrypt(bob_chk, h_c2b, ct_c2b, b"")
-    print(" [x] Check 2: Per-message key uniqueness (identical plaintexts produce unique ciphertexts and distinct n)")
+
+    # Sub-Step SM.2: Attempting to replay an already-consumed message must be rejected
+    replay_threw = False
+    try:
+        decrypt(bob_chk, h_c2a, ct_c2a, b"")
+    except ValueError as e:
+        replay_threw = True
+        assert "message key cannot be reused" in str(e)
+    assert replay_threw is True, "Replaying an already-consumed message must be rejected (no key reuse)"
+    print(" [x] Check 2: Per-message key uniqueness & replay rejection (keys never reused)")
 
     # Check 3: Header tampering rejected: Flip one bit in header.n; Bob's decrypt must throw GCM auth error
     tamper_sec = secrets.token_bytes(32)
