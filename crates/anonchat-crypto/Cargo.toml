@@ -1,0 +1,25 @@
+[package]
+name = "anonchat-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+

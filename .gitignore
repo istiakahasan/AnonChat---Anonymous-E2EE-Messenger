@@ -1,0 +1,57 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Node / Expo / Web
+node_modules/
+.expo/
+dist/
+build/
+web-build/
+*.tsbuildinfo
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Android / Gradle
+.gradle/
+**/android/.gradle/
+**/android/app/build/
+**/android/build/
+*.iml
+.idea/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+**/flutter_client/build/
+**/flutter_client/.dart_tool/
+
+# iOS
+**/ios/Pods/
+**/ios/build/
+*.xcworkspace
+*.xcuserdatad
+DerivedData/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/*
+!.vscode/settings.json

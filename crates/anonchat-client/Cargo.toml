@@ -1,0 +1,25 @@
+[package]
+name = "anonchat-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anonchat-crypto = { path = "../anonchat-crypto" }
+tokio.workspace = true
+tokio-stream.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing = "0.1"
+rusqlite.workspace = true
+secrecy.workspace = true
+rand.workspace = true
+

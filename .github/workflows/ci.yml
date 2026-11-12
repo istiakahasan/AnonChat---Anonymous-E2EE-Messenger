@@ -1,0 +1,57 @@
+name: AnonChat CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-crypto-and-e2e:
+    name: Cryptographic & E2E Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run E2E Verification Suite (Tasks 1-6 & Security Checklist)
+        run: python tests/e2e_verification.py
+
+      - name: Run Interactive Demo Verification
+        run: python scripts/demo_chat.py
+
+  lint-expo-client:
+    name: Expo / React Native TypeScript Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: expo-client
+        run: npm install --legacy-peer-deps
+
+      - name: Typecheck TypeScript
+        working-directory: expo-client
+        run: npx tsc --noEmit
+
+  docker-build:
+    name: Build Blind Relay Container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Blind Relay image
+        run: docker compose build
+

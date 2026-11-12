@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AnonChat Web (Signal-WASM Prototype)</title>
+  <style>
+    :root {
+      --bg-color: #121212;
+      --card-bg: #1e1e1e;
+      --text: #ffffff;
+      --text-muted: #888888;
+      --accent: #00d2b4;
+      --danger-bg: #b71c1c;
+      --warning-border: #ff9800;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text);
+      padding: 20px;
+    }
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+    }
+    .warning-banner {
+      background-color: rgba(183, 28, 28, 0.25);
+      border: 1px solid var(--danger-bg);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+    }
+    .warning-title {
+      color: #ff5252;
+      font-weight: bold;
+      font-size: 16px;
+      margin-bottom: 6px;
+    }
+    .card {
+      background-color: var(--card-bg);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+      border: 1px solid #2a2a2a;
+    }
+    h1, h2, h3 {
+      color: var(--accent);
+      margin-top: 0;
+    }
+    button {
+      background-color: var(--accent);
+      color: #000;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover {
+      opacity: 0.9;
+    }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      background-color: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 6px;
+      color: #fff;
+      padding: 10px;
+      margin-top: 6px;
+      margin-bottom: 12px;
+      font-family: monospace;
+    }
+    pre {
+      background-color: #0a0a0a;
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 12px;
+      color: #80cbc4;
+    }
+    .safety-code {
+      font-size: 18px;
+      font-family: monospace;
+      color: #ffb74d;
+      letter-spacing: 2px;
+      background: #111;
+      padding: 10px;
+      border-radius: 6px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="warning-banner">
+      <div class="warning-title">⚠️ CRITICAL SECURITY WARNING</div>
+      <div>
+        <strong>@getmaapp/signal-wasm</strong> bindings are <strong>UNAUDITED</strong>.
+        Upstream note: <em>"the bindings themselves have not been audited"</em> and were built with AI agent assistance.
+        <strong>DO NOT USE IN PRODUCTION</strong> for an anonymity-focused application. Use strictly for experimental prototyping.
+      </div>
+    </div>
+
+    <h1>🔒 AnonChat Web (@getmaapp/signal-wasm)</h1>
+    <p style="color: var(--text-muted)">
+      Browser WebAssembly implementation using Web Crypto API for CSPRNG randomness and Encrypted IndexedDB (AES-256-GCM) for state persistence.
+    </p>
+
+    <!-- Initialization Section -->
+    <div class="card">
+      <h2>1. WebAssembly & Client Initialization</h2>
+      <p>Initializes WASM module and instantiates <code>new SignalClient(uuid, 1)</code>.</p>
+      <button id="btn-init">Initialize WASM Engine</button>
+      <div id="init-status" style="margin-top: 10px; color: var(--text-muted)">Status: Not initialized</div>
+    </div>
+
+    <!-- Key Generation Section -->
+    <div class="card">
+      <h2>2. Generate Registration Keys (PreKeys & Kyber PQ)</h2>
+      <button id="btn-gen-keys" disabled>Generate Registration PreKey Bundle</button>
+      <pre id="keys-output">// PreKeyBundle output will appear here...</pre>
+    </div>
+
+    <!-- Encryption / Decryption Playground -->
+    <div class="card">
+      <h2>3. Encrypt / Decrypt & Safety Numbers</h2>
+      <label>Plaintext Message:</label>
+      <input id="input-msg" type="text" value="Hello from browser WebAssembly Signal Protocol!" />
+      <button id="btn-test-cipher" disabled>Simulate Local Session & Encrypt</button>
+
+      <div style="margin-top: 16px;">
+        <label>Ciphertext Result:</label>
+        <pre id="cipher-output">// Ciphertext will appear here...</pre>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <label>Safety Number (Fingerprint):</label>
+        <div id="safety-number-box" class="safety-code">---- ---- ---- ----</div>
+      </div>
+    </div>
+
+    <!-- Encrypted IndexedDB Persistence -->
+    <div class="card">
+      <h2>4. Persistence (Encrypted IndexedDB)</h2>
+      <p style="color: var(--text-muted)">
+        Uses <code>window.crypto.subtle</code> with a non-extractable 256-bit AES-GCM master key to encrypt sessions in IndexedDB at rest.
+      </p>
+      <button id="btn-persist" disabled>Persist Session to Encrypted IndexedDB</button>
+      <button id="btn-restore" disabled style="margin-left: 10px; background-color: #37474f; color: #fff;">Restore Session</button>
+      <div id="db-status" style="margin-top: 10px; color: var(--text-muted)">Storage: Ready</div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+

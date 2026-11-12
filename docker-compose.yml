@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: crates/anonchat-server/Dockerfile
+    container_name: anonchat-relay
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DATABASE_URL=postgres://anonchat:anonchat_secret@db:5432/anonchat_db
+      - RUST_LOG=anonchat_server=info
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - anonchat-net
+
+  db:
+    image: postgres:15-alpine
+    container_name: anonchat-db
+    restart: always
+    environment:
+      - POSTGRES_USER=anonchat
+      - POSTGRES_PASSWORD=anonchat_secret
+      - POSTGRES_DB=anonchat_db
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anonchat -d anonchat_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - anonchat-net
+
+volumes:
+  postgres_data:
+
+networks:
+  anonchat-net:
+    driver: bridge
+
