@@ -199,6 +199,128 @@ public class DoubleRatchetSession {
         return padded
     }
 
+    public static let maxSkip: UInt32 = 100
+    public static let maxSkippedKeys: Int = 1000
+
+    /// Ratchet Decrypt: Decrypts an inbound message envelope (Sub-Step 4.3).
+    ///
+    /// 1. Checks skipped keys first: key = header.dh + ":" + header.n
+    /// 2. If new peer DH public key (`header.dh != state.DHr`), performs DH ratchet step:
+    ///    a. Save skipped keys from current receiving chain up to header.pn
+    ///    b. Perform DH ratchet step (Sub-Step 4.4)
+    /// 3. Skip messages in the new chain up to header.n
+    /// 4. Advance receiving chain: (CKr_new, MK) = KDF_CK(CKr)
+    /// 5. Decrypt ciphertext with AES-256-GCM using MK and header as AAD
+    public func ratchetDecrypt(envelope: EncryptedEnvelope) throws -> Data {
+        guard let peerDhData = Data(base64Encoded: envelope.header.dhPub),
+              let peerDhPublic = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerDhData) else {
+            throw NSError(domain: "AnonChat", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid peer DH public key"])
+        }
+
+        // 1. Check skipped keys first
+        let skipKey = "\(envelope.header.dhPub):\(envelope.header.n)"
+        if let mk = skippedKeys.removeValue(forKey: skipKey) {
+            return try decryptWithMK(mk: mk, envelope: envelope)
+        }
+
+        // 2. Check for DH ratchet step:
+        // In the decrypt function, compare header.dh with state.DHr
+        // if header.dh != state.DHr { perform DH ratchet step }
+        let isNewDh = (dhrPublic == nil || dhrPublic?.rawRepresentation != peerDhPublic.rawRepresentation)
+        if isNewDh {
+            // a. Save skipped keys from current receiving chain up to header.pn
+            try skipMessageKeys(until: envelope.header.pn)
+            // b. Perform DH ratchet step
+            try dhRatchet(peerDhPublic: peerDhPublic)
+            self.bobFirstMessage = false
+        }
+
+        // 3. Skip messages in the new chain up to header.n
+        try skipMessageKeys(until: envelope.header.n)
+
+        // 4. Derive message key: (CKr_new, MK) = KDF_CK(CKr)
+        guard let currentCkr = receivingChainKey else {
+            throw NSError(domain: "AnonChat", code: 3, userInfo: [NSLocalizedDescriptionKey: "Missing receiving chain key"])
+        }
+        let (nextCkr, mk) = kdfCk(ck: currentCkr)
+        self.receivingChainKey = nextCkr
+        self.nr += 1
+        self.bobFirstMessage = false
+
+        // 5. Decrypt with MK
+        return try decryptWithMK(mk: mk, envelope: envelope)
+    }
+
+    private func dhRatchet(peerDhPublic: Curve25519.KeyAgreement.PublicKey) throws {
+        self.pn = self.ns
+        self.ns = 0
+        self.nr = 0
+        self.dhrPublic = peerDhPublic
+
+        // DH step 1: Derives receiving chain key
+        let dhOutRx = try dhsPrivate.sharedSecretFromKeyAgreement(with: peerDhPublic)
+        let (newRkRx, ckr) = DoubleRatchetSession.kdfRk(rk: rootKey, dhOut: dhOutRx)
+        self.rootKey = newRkRx
+        self.receivingChainKey = ckr
+
+        // DH step 2: Generate fresh ephemeral DH keypair and derive sending chain key
+        let newDhsPriv = Curve25519.KeyAgreement.PrivateKey()
+        let newDhsPub = newDhsPriv.publicKey
+        let dhOutTx = try newDhsPriv.sharedSecretFromKeyAgreement(with: peerDhPublic)
+        let (newRkTx, cks) = DoubleRatchetSession.kdfRk(rk: newRkRx, dhOut: dhOutTx)
+        self.dhsPrivate = newDhsPriv
+        self.dhsPublic = newDhsPub
+        self.rootKey = newRkTx
+        self.sendingChainKey = cks
+    }
+
+    private func skipMessageKeys(until: UInt32) throws {
+        if until > self.nr + DoubleRatchetSession.maxSkip {
+            throw NSError(domain: "AnonChat", code: 4, userInfo: [NSLocalizedDescriptionKey: "Skip gap too large: \(until - self.nr) > \(DoubleRatchetSession.maxSkip)"])
+        }
+        if let currentCkr = receivingChainKey, let currentDhr = dhrPublic {
+            let dhrStr = currentDhr.rawRepresentation.base64EncodedString()
+            var ckr = currentCkr
+            while self.nr < until {
+                if skippedKeys.count >= DoubleRatchetSession.maxSkippedKeys {
+                    throw NSError(domain: "AnonChat", code: 5, userInfo: [NSLocalizedDescriptionKey: "Too many skipped message keys"])
+                }
+                let (nextCkr, mk) = kdfCk(ck: ckr)
+                ckr = nextCkr
+                skippedKeys["\(dhrStr):\(self.nr)"] = mk
+                self.nr += 1
+            }
+            self.receivingChainKey = ckr
+        }
+    }
+
+    private func decryptWithMK(mk: SymmetricKey, envelope: EncryptedEnvelope) throws -> Data {
+        guard let nonceData = Data(base64Encoded: envelope.nonce),
+              let combinedData = Data(base64Encoded: envelope.ciphertext),
+              combinedData.count >= 16 else {
+            throw NSError(domain: "AnonChat", code: 6, userInfo: [NSLocalizedDescriptionKey: "Invalid ciphertext or nonce"])
+        }
+        let nonce = try AES.GCM.Nonce(data: nonceData)
+        let ct = combinedData.prefix(combinedData.count - 16)
+        let tag = combinedData.suffix(16)
+        let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ct, tag: tag)
+        let aad = envelope.header.toAADData()
+        let decrypted = try AES.GCM.open(box, using: mk, authenticating: aad)
+        return try unpadFrom4KB(data: decrypted)
+    }
+
+    private func unpadFrom4KB(data: Data) throws -> Data {
+        guard data.count >= 4 else {
+            throw NSError(domain: "AnonChat", code: 7, userInfo: [NSLocalizedDescriptionKey: "Padded payload too short"])
+        }
+        let lenBigEndian = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self) }
+        let origLen = Int(UInt32(bigEndian: lenBigEndian))
+        guard data.count >= 4 + origLen else {
+            throw NSError(domain: "AnonChat", code: 8, userInfo: [NSLocalizedDescriptionKey: "Padded payload corrupted: invalid length field"])
+        }
+        return data.subdata(in: 4..<(4 + origLen))
+    }
+
     private static func kdfRk(rk: SymmetricKey, dhOut: SharedSecret) -> (SymmetricKey, SymmetricKey) {
         var dhData = Data()
         dhOut.withUnsafeBytes { dhData.append(contentsOf: $0) }

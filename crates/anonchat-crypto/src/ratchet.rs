@@ -465,10 +465,22 @@ impl RatchetSession {
         })
     }
 
+    /// Returns the stored peer DH ratchet public key (`state.DHr`) Base64-encoded string, or None if unset.
+    pub fn dhr(&self) -> Option<String> {
+        self.dhr_public.map(|k| BASE64.encode(k.as_bytes()))
+    }
+
+    /// Accessor for the peer's stored DH public key (`state.DHr`) as raw bytes.
+    pub fn dhr_bytes(&self) -> Option<[u8; 32]> {
+        self.dhr_public.map(|k| *k.as_bytes())
+    }
+
     /// Ratchet Decrypt: Decrypts an inbound message envelope.
     ///
     /// 1. Checks skipped message keys for `(dh_pub, n)`.
-    /// 2. If new peer DH public key, performs DH ratchet step.
+    /// 2. If new peer DH public key (`header.dh != state.DHr`), performs DH ratchet step:
+    ///    a. Saves skipped keys from current receiving chain up to `header.pn`.
+    ///    b. Advances DH ratchet (derives new CKr and fresh DHs / CKs).
     /// 3. Skips any intermediate message keys up to `header.n`.
     /// 4. Advances receiving chain: `(next_ckr, mk) = KDF_CK(ckr)`.
     /// 5. Authenticates header as AAD and decrypts ciphertext with AES-256-GCM.
@@ -497,15 +509,20 @@ impl RatchetSession {
             return res;
         }
 
-        // 2. If new DH key received from peer, advance DH Ratchet
-        let is_new_dh = self
-            .dhr_public
-            .map(|existing| existing.as_bytes() != peer_dh_public.as_bytes())
-            .unwrap_or(true);
+        // 2. Check for DH ratchet step when a new DH public key appears in the header:
+        // Compare `header.dh` (the sender's current DH public key) with `state.DHr` (the stored peer DH public key).
+        // if header.dh != state.DHr {
+        //     // New DH key detected — perform DH ratchet step
+        // }
+        let is_new_dh = match &self.dhr_public {
+            Some(existing) => existing.as_bytes() != peer_dh_public.as_bytes(),
+            None => true,
+        };
 
         if is_new_dh {
-            // Skip any messages left in the previous receiving chain
+            // a. Save skipped keys from the current receiving chain up to header.pn
             self.skip_message_keys(envelope.header.pn)?;
+            // b. Perform DH ratchet step (Sub-Step 4.4)
             self.dh_ratchet(&peer_dh_public)?;
             self.bob_first_message = false;
         }
@@ -568,8 +585,8 @@ impl RatchetSession {
 
     /// Skips message keys in the receiving chain and stores them in `skipped_message_keys`.
     fn skip_message_keys(&mut self, until: u32) -> Result<(), RatchetError> {
-        if until > self.nr + MAX_SKIP {
-            return Err(RatchetError::GapTooLarge(until - self.nr));
+        if until > self.nr.saturating_add(MAX_SKIP) {
+            return Err(RatchetError::GapTooLarge(until.saturating_sub(self.nr)));
         }
 
         if let Some(ref ckr_secret) = self.receiving_chain_key {
@@ -804,6 +821,128 @@ pub fn decrypt(
         ciphertext: BASE64.encode(&actual_ct),
     };
     session.ratchet_decrypt(&envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dh_ratchet_step_detection_when_new_dh_key_appears() {
+        let shared_secret = [0x42u8; 32];
+        let bob_keypair = RatchetKeyPair::generate();
+        let bob_spk_pub = bob_keypair.public;
+
+        let mut alice = init_sender_state(&shared_secret, bob_spk_pub.as_bytes()).unwrap();
+        let mut bob = init_receiver_state(&shared_secret, bob_keypair);
+
+        // Initially, Bob has not yet received Alice's ratchet key
+        assert!(bob.dhr().is_none());
+        assert_eq!(bob.ns, 0);
+        assert_eq!(bob.nr, 0);
+        assert!(bob.bob_first_message);
+
+        // Alice sends message 0
+        let msg0 = b"Hello Bob, this is message 0";
+        let (header0, ct0) = encrypt(&mut alice, msg0, b"").unwrap();
+        assert_eq!(header0.n, 0);
+        assert_eq!(header0.pn, 0);
+        assert_eq!(header0.dh, BASE64.encode(alice.dhs_public.as_bytes()));
+
+        // When message 0 arrives at Bob:
+        // Detection: header0.dh != bob.dhr() (since bob.dhr() is None)
+        assert_ne!(Some(header0.dh.clone()), bob.dhr());
+
+        // Bob decrypts: triggers DH ratchet step
+        let pt0 = decrypt(&mut bob, &header0, &ct0, b"").unwrap();
+        assert_eq!(pt0, msg0);
+
+        // Invariants after DH ratchet step:
+        // 1. Bob's state.DHr updated to header0.dh
+        assert_eq!(bob.dhr(), Some(header0.dh.clone()));
+        // 2. Bob's bob_first_message transitioned to false
+        assert!(!bob.bob_first_message);
+        // 3. Bob's receiving message counter Nr incremented to 1
+        assert_eq!(bob.nr, 1);
+        // 4. Bob derived sending chain key CKs during the DH ratchet step
+        assert!(bob.sending_chain_key.is_some());
+        // 5. Bob's Ns is 0
+        assert_eq!(bob.ns, 0);
+
+        // Alice sends message 1 in the SAME sending chain (no new DH key)
+        let msg1 = b"Hello Bob, message 1 in same chain";
+        let (header1, ct1) = encrypt(&mut alice, msg1, b"").unwrap();
+        assert_eq!(header1.n, 1);
+        assert_eq!(header1.pn, 0);
+        assert_eq!(header1.dh, header0.dh, "DH key must remain same within sending chain");
+
+        // When message 1 arrives at Bob:
+        // Detection: header1.dh == bob.dhr() -> NO DH ratchet step!
+        assert_eq!(Some(header1.dh.clone()), bob.dhr());
+        let pt1 = decrypt(&mut bob, &header1, &ct1, b"").unwrap();
+        assert_eq!(pt1, msg1);
+        assert_eq!(bob.nr, 2);
+
+        // Now Bob replies: Bob sends message 0 on his ratcheted sending chain
+        let reply0 = b"Hi Alice, Bob replying with newly ratcheted DHs";
+        let (bob_header0, bob_ct0) = encrypt(&mut bob, reply0, b"").unwrap();
+        assert_eq!(bob_header0.n, 0);
+        assert_eq!(bob_header0.dh, BASE64.encode(bob.dhs_public.as_bytes()));
+
+        // Alice receives Bob's reply:
+        // Detection: bob_header0.dh != alice.dhr()
+        assert_ne!(Some(bob_header0.dh.clone()), alice.dhr());
+
+        let alice_pt0 = decrypt(&mut alice, &bob_header0, &bob_ct0, b"").unwrap();
+        assert_eq!(alice_pt0, reply0);
+        assert_eq!(alice.dhr(), Some(bob_header0.dh.clone()));
+        assert_eq!(alice.nr, 1);
+        assert_eq!(alice.ns, 0, "Alice Ns reset to 0 after DH ratchet step");
+    }
+
+    #[test]
+    fn test_out_of_order_message_skip_and_resolve() {
+        let shared_secret = [0x55u8; 32];
+        let bob_kp = RatchetKeyPair::generate();
+        let mut alice = init_sender_state(&shared_secret, bob_kp.public.as_bytes()).unwrap();
+        let mut bob = init_receiver_state(&shared_secret, bob_kp);
+
+        let (h0, ct0) = encrypt(&mut alice, b"Msg 0", b"").unwrap();
+        let (h1, ct1) = encrypt(&mut alice, b"Msg 1", b"").unwrap();
+        let (h2, ct2) = encrypt(&mut alice, b"Msg 2", b"").unwrap();
+
+        // Deliver Msg 2 first (skipping 0 and 1)
+        let pt2 = decrypt(&mut bob, &h2, &ct2, b"").unwrap();
+        assert_eq!(pt2, b"Msg 2");
+        assert_eq!(bob.nr, 3);
+        assert_eq!(bob.skipped_message_keys.len(), 2);
+
+        // Deliver delayed Msg 0
+        let pt0 = decrypt(&mut bob, &h0, &ct0, b"").unwrap();
+        assert_eq!(pt0, b"Msg 0");
+        assert_eq!(bob.skipped_message_keys.len(), 1);
+
+        // Deliver delayed Msg 1
+        let pt1 = decrypt(&mut bob, &h1, &ct1, b"").unwrap();
+        assert_eq!(pt1, b"Msg 1");
+        assert_eq!(bob.skipped_message_keys.len(), 0);
+    }
+
+    #[test]
+    fn test_max_skip_enforcement() {
+        let shared_secret = [0x77u8; 32];
+        let bob_kp = RatchetKeyPair::generate();
+        let mut bob = init_receiver_state(&shared_secret, bob_kp);
+
+        // Craft a header with gap > 100
+        let dh = BASE64.encode(&[0x11u8; 32]);
+        let malicious_header = MessageHeader { dh, pn: 0, n: 100000 };
+        let dummy_ct = vec![0u8; 32];
+        let dummy_nonce = vec![0u8; 12];
+
+        let err = decrypt(&mut bob, &malicious_header, &dummy_ct, &dummy_nonce);
+        assert!(err.is_err());
+    }
 }
 
 

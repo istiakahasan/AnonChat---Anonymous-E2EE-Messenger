@@ -307,11 +307,24 @@ Inputs: `(header, nonce, ciphertext)`
      - Delete entry from `MKSKIPPED` immediately (enforces forward secrecy against replay).
      - Decrypt ciphertext with `MK` using AES-256-GCM and header as AAD.
      - Zeroize `MK` and return plaintext (without advancing any ratchet state).
-2. **Check for DH Ratchet Step**:
-   - If `header.dh != state.DHr`:
-     - Save skipped keys from current receiving chain up to $PN$: while $N_r < \text{header.pn}$, derive $(CK_{r\text{,new}}, MK_{\text{skipped}}) = \text{KDF\_CK}(CK_r)$, store in `MKSKIPPED[state.DHr + ":" + state.Nr]`, advance $CK_r$ and $N_r$.
+2. **Check for DH Ratchet Step (New DH Key Detection)**:
+   - Compare `header.dh` (the sender's current DH public key) with `state.DHr` (the stored peer DH public key):
+     ```rust
+     if header.dh != state.DHr {
+         // New DH key detected — perform DH ratchet step
+     }
+     ```
+   - If `header.dh != state.DHr` (or if `state.DHr` is null on first message):
+     - **Save skipped keys from current receiving chain up to $PN$**: while $N_r < \text{header.pn}$, derive $(CK_{r\text{,new}}, MK_{\text{skipped}}) = \text{KDF\_CK}(CK_r)$, store in `MKSKIPPED[state.DHr + ":" + state.Nr]`, advance $CK_r$ and $N_r$.
      - Enforce `MAX_SKIP = 100` ceiling on skip gap ($until - N_r \le 100$) and cache capacity limit (`MAX_SKIPPED_KEYS = 1000`).
-     - Perform Diffie-Hellman ratchet step (Sub-Step 4.4).
+     - **Perform Diffie-Hellman ratchet step (Sub-Step 4.4)**:
+       1. $\text{state.PNs} \leftarrow \text{state.Ns}$ (save previous sending chain length).
+       2. $\text{state.Ns} \leftarrow 0$ (reset sending message counter).
+       3. $\text{state.Nr} \leftarrow 0$ (reset receiving message counter for new chain).
+       4. $\text{state.DHr} \leftarrow \text{header.dh}$ (update peer's DH public key).
+       5. Derive new receiving chain key: $(\text{state.RK}, \text{state.CKr}) = \text{KDF\_RK}(\text{state.RK}, X25519(\text{state.DHs\_private}, \text{state.DHr}))$.
+       6. Generate fresh ephemeral keypair: $\text{state.DHs} \leftarrow \text{generate\_X25519\_keypair}()$.
+       7. Derive new sending chain key: $(\text{state.RK}, \text{state.CKs}) = \text{KDF\_RK}(\text{state.RK}, X25519(\text{state.DHs\_new\_private}, \text{state.DHr}))$.
 3. **Skip Messages in New Chain**:
    - While $N_r < \text{header.n}$:
      - Derive $(CK_{r\text{,new}}, MK_{\text{skipped}}) = \text{KDF\_CK}(CK_r)$.
