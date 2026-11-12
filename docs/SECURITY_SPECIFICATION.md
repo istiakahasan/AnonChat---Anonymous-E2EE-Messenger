@@ -409,6 +409,30 @@ Double Ratchet sessions maintain critical continuous cryptographic state across 
 - **Immediate Resumption**: When an application restarts or awakes from background sleep, active ratchet states are reloaded from SQLCipher into memory. Outbound and inbound message counters ($N_s, N_r$) continue sequentially without key desynchronization.
 - **Zeroization**: In-memory secrets (`Zeroize`, `ZeroizeOnDrop`) are wiped from memory buffers when sessions are closed or dropped.
 
+### 5.13 Mandatory Pre-Backup Warning Screen & User Mental Model Framing
+
+#### User Mental Model Framing:
+End-to-end encrypted backup systems that promise recoverability while cryptographically guaranteeing zero-knowledge unrecoverability cause severe user frustration if the threat model is not made explicit *before* key generation. Reframing the limitation as a fundamental privacy feature aligns user expectations with technical realities.
+
+#### UI & Textual Requirements:
+Before the user can enter a passphrase or generate a recovery code, a full-screen warning is shown:
+
+1. **Header**:
+   `"Your backup is yours alone"`
+2. **Body Text**:
+   `"If you lose your passphrase, your backup cannot be recovered. No one, including us, can help you. We do not have a copy of your key."`
+3. **Secondary Framing Text**:
+   `"This is not a limitation. It is what makes your backup private. If we could recover it, so could anyone who compromises our servers."`
+4. **Required Explicit Acknowledgment (Checkbox)**:
+   `"I understand that if I lose my passphrase, my backup is permanently lost."`
+5. **Continue Button**:
+   Strictly disabled (`disabled = true`) until the user checks the acknowledgment checkbox.
+
+#### Anti-Bypass Enforcements:
+- **No Skip or Deferred Prompts**: The interface does not provide a `"Skip"`, `"Later"`, or `"Remind me later"` option.
+- **Ephemeral State (No Memory on Navigation Away)**: If the user navigates away or cancels, the application does not record or persist that the warning was viewed. The screen is presented fresh every time backup generation is initiated.
+
+
 
 
 

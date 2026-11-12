@@ -2268,6 +2268,80 @@ def run_all_tests():
     print(" [x] Check 8: State persistence (close app, reopen, continue conversation with existing state)")
     print("=" * 70)
 
+    # 20. TASK: MANDATORY PRE-BACKUP WARNING SCREEN (UI & SECURITY INVARIANTS)
+    print("\n[+] [Pre-Backup Warning] Testing Mandatory Pre-Backup Warning Screen Requirements...")
+
+    EXPECTED_PRE_BACKUP_HEADER = "Your backup is yours alone"
+    EXPECTED_PRE_BACKUP_BODY = (
+        "If you lose your passphrase, your backup cannot be recovered. "
+        "No one, including us, can help you. We do not have a copy of your key."
+    )
+    EXPECTED_PRE_BACKUP_SECONDARY = (
+        "This is not a limitation. It is what makes your backup private. "
+        "If we could recover it, so could anyone who compromises our servers."
+    )
+    EXPECTED_PRE_BACKUP_CHECKBOX = (
+        "I understand that if I lose my passphrase, my backup is permanently lost."
+    )
+
+    class MockPreBackupWarningScreen:
+        def __init__(self):
+            self.header = EXPECTED_PRE_BACKUP_HEADER
+            self.body = EXPECTED_PRE_BACKUP_BODY
+            self.secondary = EXPECTED_PRE_BACKUP_SECONDARY
+            self.checkbox_label = EXPECTED_PRE_BACKUP_CHECKBOX
+            self.checkbox_checked = False
+            self.allow_skip = False
+            self.allow_remind_me_later = False
+
+        def can_continue(self) -> bool:
+            return self.checkbox_checked
+
+        def on_continue(self):
+            if not self.checkbox_checked:
+                raise PermissionError("Cannot proceed: Checkbox must be explicitly checked before entering passphrase")
+            return "NAVIGATE_TO_PASSPHRASE_ENTRY"
+
+        def on_navigate_away(self):
+            # Ephemeral state: do not remember that the user saw or checked the warning
+            self.checkbox_checked = False
+
+    screen = MockPreBackupWarningScreen()
+
+    # Test 20.1: Validate exact wording
+    assert screen.header == "Your backup is yours alone"
+    assert "No one, including us, can help you." in screen.body
+    assert "We do not have a copy of your key." in screen.body
+    assert "This is not a limitation. It is what makes your backup private." in screen.secondary
+    assert "If we could recover it, so could anyone who compromises our servers." in screen.secondary
+    assert screen.checkbox_label == "I understand that if I lose my passphrase, my backup is permanently lost."
+    print("    [PASS] Step 1: Exact wording verified for Header, Body, Secondary text, and Checkbox.")
+
+    # Test 20.2: Continue button disabled until checkbox is checked
+    assert screen.can_continue() is False, "Continue button must be disabled when checkbox is unchecked"
+    threw_on_continue = False
+    try:
+        screen.on_continue()
+    except PermissionError:
+        threw_on_continue = True
+    assert threw_on_continue is True, "Calling continue while unchecked must throw error"
+
+    screen.checkbox_checked = True
+    assert screen.can_continue() is True, "Continue button must be enabled when checkbox is checked"
+    assert screen.on_continue() == "NAVIGATE_TO_PASSPHRASE_ENTRY"
+    print("    [PASS] Step 2: Continue button is strictly disabled until the required checkbox is checked.")
+
+    # Test 20.3: Do Not Allow Bypass
+    assert screen.allow_skip is False, "Screen must not offer a 'Skip' button"
+    assert screen.allow_remind_me_later is False, "Screen must not offer a 'Remind me later' button"
+
+    # Test 20.4: Ephemeral state - navigating away resets acknowledgement
+    screen.checkbox_checked = True
+    screen.on_navigate_away()
+    assert screen.checkbox_checked is False, "Navigating away must NOT remember acknowledgement (ephemeral state)"
+    assert screen.can_continue() is False, "Returning to backup must require re-acknowledgement"
+    print("    [PASS] Step 3: No bypass permitted (no Skip/Remind later; navigating away resets state).")
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")

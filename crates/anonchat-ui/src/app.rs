@@ -96,6 +96,8 @@ pub struct AnonChatApp {
     pub show_accept_warning_modal: bool,
 
     // Backup Container State
+    pub show_pre_backup_warning: bool,
+    pub pre_backup_warning_acknowledged: bool,
     pub show_backup_dialog: bool,
     pub backup_passphrase: String,
     pub backup_status_msg: Option<(String, bool)>,
@@ -141,6 +143,8 @@ impl AnonChatApp {
             has_key_change_lock: false,
             show_key_change_dialog: false,
             show_accept_warning_modal: false,
+            show_pre_backup_warning: false,
+            pre_backup_warning_acknowledged: false,
             show_backup_dialog: false,
             backup_passphrase: String::new(),
             backup_status_msg: None,
@@ -234,7 +238,9 @@ impl AnonChatApp {
                             self.show_add_contact_dialog = true;
                         }
                         if ui.button("💾 Backup").clicked() {
-                            self.show_backup_dialog = true;
+                            self.show_pre_backup_warning = true;
+                            self.pre_backup_warning_acknowledged = false;
+                            self.show_backup_dialog = false;
                         }
                     });
                 });
@@ -641,6 +647,79 @@ impl AnonChatApp {
                         });
                     });
             }
+        }
+
+        // Mandatory Pre-Backup Warning Screen
+        if self.show_pre_backup_warning {
+            egui::Window::new("Security Warning: Your backup is yours alone")
+                .collapsible(false)
+                .resizable(false)
+                .min_width(520.0)
+                .show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    ui.heading(
+                        RichText::new("Your backup is yours alone")
+                            .size(20.0)
+                            .color(Color32::from_rgb(255, 82, 82))
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+
+                    // Body text (exact wording)
+                    ui.label(
+                        RichText::new(
+                            "If you lose your passphrase, your backup cannot be recovered. No one, including us, can help you. We do not have a copy of your key."
+                        )
+                        .size(14.0)
+                        .color(Color32::WHITE)
+                        .strong(),
+                    );
+
+                    ui.add_space(8.0);
+
+                    // Secondary text (exact wording)
+                    ui.label(
+                        RichText::new(
+                            "This is not a limitation. It is what makes your backup private. If we could recover it, so could anyone who compromises our servers."
+                        )
+                        .size(13.0)
+                        .color(Color32::from_rgb(180, 180, 180)),
+                    );
+
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+
+                    // Required action: Checkbox (exact wording)
+                    ui.checkbox(
+                        &mut self.pre_backup_warning_acknowledged,
+                        RichText::new(
+                            "I understand that if I lose my passphrase, my backup is permanently lost."
+                        )
+                        .color(Color32::from_rgb(255, 215, 0))
+                        .strong(),
+                    );
+
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        // Continue button: Disabled until the checkbox is checked
+                        let can_continue = self.pre_backup_warning_acknowledged;
+                        if ui
+                            .add_enabled(can_continue, egui::Button::new(RichText::new("Continue").strong()))
+                            .clicked()
+                        {
+                            self.show_pre_backup_warning = false;
+                            self.pre_backup_warning_acknowledged = false; // Never remember
+                            self.show_backup_dialog = true;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            // If the user navigates away, do not remember that they saw the warning
+                            self.show_pre_backup_warning = false;
+                            self.pre_backup_warning_acknowledged = false;
+                        }
+                    });
+                });
         }
 
         // Self-Describing Encrypted Backup Container Dialog

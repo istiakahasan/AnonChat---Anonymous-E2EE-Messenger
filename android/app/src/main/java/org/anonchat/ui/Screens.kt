@@ -399,3 +399,138 @@ fun generateQrBitmap(content: String, size: Int): Bitmap? {
     }
 }
 
+/**
+ * Mandatory Pre-Backup Warning Screen (Android Jetpack Compose)
+ *
+ * Requirements:
+ * 1. Header: "Your backup is yours alone"
+ * 2. Body text: "If you lose your passphrase, your backup cannot be recovered. No one, including us, can help you. We do not have a copy of your key."
+ * 3. Secondary text: "This is not a limitation. It is what makes your backup private. If we could recover it, so could anyone who compromises our servers."
+ * 4. Required action: Checkbox: "I understand that if I lose my passphrase, my backup is permanently lost."
+ * 5. Continue button: Disabled until the checkbox is checked.
+ * 6. Strictly NO bypass: No "Skip" or "Remind me later" options.
+ */
+@Composable
+fun PreBackupWarningScreen(
+    onContinue: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var acknowledged by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color(0xFF121212))
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                TextButton(onClick = {
+                    acknowledged = false
+                    onCancel()
+                }) {
+                    Text("Cancel", color = androidx.compose.ui.graphics.Color.Gray)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 1. Header
+            Text(
+                text = "Your backup is yours alone",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = androidx.compose.ui.graphics.Color.White
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // 2. Body Text (exact wording)
+            Surface(
+                color = androidx.compose.ui.graphics.Color(0xFF1E1E1E),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "If you lose your passphrase, your backup cannot be recovered. No one, including us, can help you. We do not have a copy of your key.",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = androidx.compose.ui.graphics.Color(0xFFF5F5F5),
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 3. Secondary Text (exact wording)
+            Text(
+                text = "This is not a limitation. It is what makes your backup private. If we could recover it, so could anyone who compromises our servers.",
+                fontSize = 14.sp,
+                color = androidx.compose.ui.graphics.Color(0xFFAAAAAA),
+                lineHeight = 20.sp
+            )
+        }
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 4. Required action: Checkbox
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(androidx.compose.ui.graphics.Color(0xFF1A1A1A), RoundedCornerShape(12.dp))
+                    .clickable { acknowledged = !acknowledged }
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = acknowledged,
+                    onCheckedChange = { acknowledged = it },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = androidx.compose.ui.graphics.Color(0xFF00D2B4),
+                        uncheckedColor = androidx.compose.ui.graphics.Color.Gray
+                    )
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "I understand that if I lose my passphrase, my backup is permanently lost.",
+                    fontSize = 14.sp,
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // 5. Continue button: Disabled until the checkbox is checked
+            Button(
+                onClick = onContinue,
+                enabled = acknowledged,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = androidx.compose.ui.graphics.Color(0xFF00D2B4),
+                    contentColor = androidx.compose.ui.graphics.Color.Black,
+                    disabledContainerColor = androidx.compose.ui.graphics.Color(0xFF262626),
+                    disabledContentColor = androidx.compose.ui.graphics.Color(0xFF555555)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+            ) {
+                Text(
+                    text = "Continue",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            }
+        }
+    }
+}
+
+
