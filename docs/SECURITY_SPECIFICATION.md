@@ -104,4 +104,21 @@ The entire 42-byte header (offsets 0 through 41) is passed as **Additional Authe
 - **Algorithm**: Argon2id, Version `0x13`.
 - **Output**: 32-byte (256-bit) symmetric key, protected by automatic zeroization (`Zeroizing` / secure memory scrubbing) immediately after use.
 
+#### React Native / Expo Native Implementation:
+```typescript
+import { argon2id } from '@sonnetstationsolutions/expo-argon2';
+
+const passwordBytes = new TextEncoder().encode(passphrase);
+const salt = crypto.getRandomValues(new Uint8Array(16));
+const key = await argon2id({
+  password: passwordBytes,
+  salt,
+  memory: 65536,   // KiB (1 << 16)
+  iterations: 3,
+  parallelism: 1,
+  hashLength: 32,
+});
+// key is a Uint8Array(32)
+```
+
 

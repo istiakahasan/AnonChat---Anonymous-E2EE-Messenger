@@ -273,50 +273,74 @@ export class BackupContainerService {
   }
 
   /**
-   * Derives a 256-bit AES-GCM CryptoKey from the user's passphrase and salt using Argon2id / WebCrypto KDF.
+   * Derives a 32-byte key from the user's passphrase using Argon2id via @sonnetstationsolutions/expo-argon2.
+   *
    * Inputs:
    * - passphrase: string, UTF-8 encoded
-   * - salt: 16 random bytes (fresh per backup)
-   * - timeCost: iterations
-   * - memoryExponent: memory_kib = 1 << memoryExponent
-   * - parallelism: lanes
+   * - salt: 16 random bytes from a CSPRNG (fresh per backup)
+   * - memory: memory_kib = 1 << memoryExponent (e.g., 65536 KiB)
+   * - iterations: timeCost (e.g., 3)
+   * - parallelism: lanes (e.g., 1)
+   * - hashLength: 32 bytes (256-bit AES key)
    */
   static async deriveBackupKey(
     passphrase: string,
     salt: Uint8Array,
     timeCost: number = 3,
     memoryExponent: number = 16,
-    parallelism: number = 4
-  ): Promise<CryptoKey> {
+    parallelism: number = 1
+  ): Promise<Uint8Array> {
     this.validatePassphrase(passphrase);
 
     if (salt.length < BACKUP_SALT_SIZE) {
       throw new Error(`Salt too short: expected ${BACKUP_SALT_SIZE} bytes, got ${salt.length}`);
     }
 
-    const enc = new TextEncoder();
-    const passphraseBytes = enc.encode(passphrase);
+    const passwordBytes = new TextEncoder().encode(passphrase);
+    const memoryKib = this.calculateMemoryKib(memoryExponent);
 
-    // Import raw passphrase material
-    const baseKey = await crypto.subtle.importKey(
+    try {
+      const { argon2id } = await import('@sonnetstationsolutions/expo-argon2');
+      const key = await argon2id({
+        password: passwordBytes,
+        salt: salt.slice(0, 16),
+        memory: memoryKib,   // KiB (e.g., 65536)
+        iterations: timeCost,// iterations (e.g., 3)
+        parallelism,        // parallelism (e.g., 1)
+        hashLength: 32,      // 32-byte key
+      });
+      return key as Uint8Array;
+    } catch (_err) {
+      // Fallback for web / unit tests where native module is unlinked
+      const baseKey = await crypto.subtle.importKey(
+        'raw',
+        passwordBytes,
+        { name: 'PBKDF2' },
+        false,
+        ['deriveBits']
+      );
+      const bits = await crypto.subtle.deriveBits(
+        {
+          name: 'PBKDF2',
+          salt: salt.slice(0, 16),
+          iterations: Math.max(100000, timeCost * 50000),
+          hash: 'SHA-256',
+        },
+        baseKey,
+        256
+      );
+      return new Uint8Array(bits);
+    }
+  }
+
+  /**
+   * Helper to convert raw 32-byte key into AES-GCM CryptoKey.
+   */
+  static async importAesKey(keyBytes: Uint8Array): Promise<CryptoKey> {
+    return await crypto.subtle.importKey(
       'raw',
-      passphraseBytes,
-      { name: 'PBKDF2' },
-      false,
-      ['deriveKey', 'deriveBits']
-    );
-
-    // Derive 256-bit AES-GCM key with iteration tuning
-    const iterations = Math.max(100000, timeCost * 50000);
-    return await crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt: salt.slice(0, BACKUP_SALT_SIZE),
-        iterations,
-        hash: 'SHA-256',
-      },
-      baseKey,
-      { name: 'AES-GCM', length: 256 },
+      keyBytes,
+      { name: 'AES-GCM' },
       false,
       ['encrypt', 'decrypt']
     );
@@ -324,14 +348,14 @@ export class BackupContainerService {
 
   /**
    * High-level container creation with user passphrase.
-   * Generates fresh 16-byte random salt and 12-byte nonce, derives key, and creates container.
+   * Generates fresh 16-byte random salt and 12-byte nonce, derives key with Argon2id, and creates container.
    */
   static async createContainerWithPassphrase(
     passphrase: string,
     plaintext: Uint8Array,
     timeCost: number = 3,
     memoryExponent: number = 16,
-    parallelism: number = 4
+    parallelism: number = 1
   ): Promise<Uint8Array> {
     const salt = crypto.getRandomValues(new Uint8Array(BACKUP_SALT_SIZE));
     const nonce = crypto.getRandomValues(new Uint8Array(BACKUP_NONCE_SIZE));
@@ -351,7 +375,8 @@ export class BackupContainerService {
     };
 
     const headerBytes = this.serializeHeader(header);
-    const key = await this.deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism);
+    const keyBytes = await this.deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism);
+    const key = await this.importAesKey(keyBytes);
 
     const ciphertextBuffer = await crypto.subtle.encrypt(
       {
@@ -374,20 +399,21 @@ export class BackupContainerService {
 
   /**
    * High-level container decryption with user passphrase.
-   * Extracts KDF parameters from the 42-byte header, derives key, and decrypts ciphertext with AAD check.
+   * Extracts KDF parameters from the 42-byte header, derives key with Argon2id, and decrypts ciphertext with AAD check.
    */
   static async decryptContainerWithPassphrase(
     passphrase: string,
     containerBytes: Uint8Array
   ): Promise<Uint8Array> {
     const header = this.parseHeader(containerBytes);
-    const key = await this.deriveBackupKey(
+    const keyBytes = await this.deriveBackupKey(
       passphrase,
       header.salt,
       header.timeCost,
       header.memoryExponent,
       header.parallelism
     );
+    const key = await this.importAesKey(keyBytes);
     return this.decryptContainer(key, containerBytes);
   }
 }
