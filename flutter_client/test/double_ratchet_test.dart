@@ -56,8 +56,9 @@ void main() {
       final envelope = aliceSession.ratchetEncrypt('Hello Bob!');
       expect(aliceSession.ns, equals(1));
 
-      // Bob receives message and transitions
-      bobSession.onMessageReceived(envelope['header'] as Map<String, dynamic>);
+      // Bob decrypts message through standard library ratchetDecrypt API
+      final pt = bobSession.ratchetDecrypt(envelope);
+      expect(utf8.decode(pt), equals('Hello Bob!'));
       expect(bobSession.bobFirstMessage, isFalse);
       expect(bobSession.nr, equals(1));
       expect(bobSession.dhr, equals(aliceSession.dhs.publicKey));
@@ -75,11 +76,11 @@ void main() {
       // 1. Bob cannot send before receiving peer ratchet key
       expect(() => bobSession.ratchetEncrypt('Cannot send yet'), throwsA(isA<StateError>()));
 
-      // 2. Alice sends message: header contains dh, pn, n; ns increments
+      // 2. Alice sends message: header contains canonical dh, pn, n; ns increments
       final env1 = aliceSession.ratchetEncrypt('Alice message 1');
       expect(aliceSession.ns, equals(1));
       final header1 = env1['header'] as Map<String, dynamic>;
-      expect(header1['dh'], equals(header1['dh_pub']));
+      expect(header1['dh'], isNotNull);
       expect(header1['n'], equals(0));
       expect(header1['pn'], equals(0));
       expect(env1['nonce'], isNotNull);
@@ -92,8 +93,8 @@ void main() {
       expect(header2['pn'], equals(0));
       expect(env2['nonce'], isNot(equals(env1['nonce']))); // Random nonce independence
 
-      // 4. Bob receives Alice's message, then encrypts reply (CKs ratchet send step)
-      bobSession.onMessageReceived(header1);
+      // 4. Bob receives Alice's message via standard ratchetDecrypt, then encrypts reply (CKs ratchet send step)
+      bobSession.ratchetDecrypt(env1);
       final bobReply = bobSession.ratchetEncrypt('Bob reply 1');
       expect(bobSession.ns, equals(1));
       final bobHeader = bobReply['header'] as Map<String, dynamic>;

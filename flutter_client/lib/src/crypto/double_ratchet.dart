@@ -377,11 +377,10 @@ class DoubleRatchetSession {
       nonce[i] = random.nextInt(256);
     }
 
-    // 4. Build the header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
+    // 4. Build the canonical Signal Double Ratchet header: { "dh": base64(DHs_public), "pn": PNs, "n": Ns }
     final dhB64 = base64.encode(dhs.publicKey);
     final header = {
       'dh': dhB64,
-      'dh_pub': dhB64,
       'pn': pns,
       'n': ns,
     };
@@ -539,39 +538,7 @@ class DoubleRatchetSession {
     sendingChainKey = cks;
   }
 
-  /// Processes received envelope and advances receiving / DH ratchet.
-  void onMessageReceived(Map<String, dynamic> header) {
-    final dhStr = (header['dh'] ?? header['dh_pub']) as String;
-    final peerDhBytes = base64.decode(dhStr);
-    if (dhr == null || !_bytesEqual(dhr!, peerDhBytes)) {
-      pns = ns;
-      ns = 0;
-      nr = 0;
-      dhr = Uint8List.fromList(peerDhBytes);
 
-      // DH Ratchet step 1: Derives receiving chain key
-      final dhOutRx = x25519(dhs.secretKey, dhr!);
-      final (newRkRx, ckr) = _kdfRk(rootKey, dhOutRx);
-      rootKey = newRkRx;
-      receivingChainKey = ckr;
-
-      // DH Ratchet step 2: Generate fresh DHs and derive sending chain key
-      dhs = RatchetKeyPair.generate(sodium);
-      final dhOutTx = x25519(dhs.secretKey, dhr!);
-      final (newRkTx, cks) = _kdfRk(rootKey, dhOutTx);
-      rootKey = newRkTx;
-      sendingChainKey = cks;
-
-      bobFirstMessage = false;
-    }
-
-    if (receivingChainKey != null) {
-      final (nextCkr, _) = _kdfCk(receivingChainKey!);
-      receivingChainKey = nextCkr;
-      nr += 1;
-      bobFirstMessage = false;
-    }
-  }
 
   /// Serializes active ratchet state to a JSON-compatible map for encrypted local persistence.
   Map<String, dynamic> toJson() {

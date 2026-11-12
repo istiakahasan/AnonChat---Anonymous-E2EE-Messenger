@@ -18,9 +18,34 @@ public class DoubleRatchetSession {
         public let n: UInt32
 
         enum CodingKeys: String, CodingKey {
-            case dhPub = "dh_pub"
+            case dhPub = "dh"
+            case dhPubLegacy = "dh_pub"
             case pn = "pn"
             case n = "n"
+        }
+
+        public init(dhPub: String, pn: UInt32, n: UInt32) {
+            self.dhPub = dhPub
+            self.pn = pn
+            self.n = n
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let dh = try? container.decode(String.self, forKey: .dhPub) {
+                self.dhPub = dh
+            } else {
+                self.dhPub = try container.decode(String.self, forKey: .dhPubLegacy)
+            }
+            self.pn = try container.decode(UInt32.self, forKey: .pn)
+            self.n = try container.decode(UInt32.self, forKey: .n)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(dhPub, forKey: .dhPub)
+            try container.encode(pn, forKey: .pn)
+            try container.encode(n, forKey: .n)
         }
 
         public func toAADData() -> Data {
@@ -163,11 +188,11 @@ public class DoubleRatchetSession {
 
         let paddedPayload = padTo4KB(data: plaintext)
 
-        // 96-bit Nonce derived deterministically from message number
-        var nonceBytes = Data(repeating: 0, count: 12)
-        var bigN = header.n.bigEndian
-        withUnsafeBytes(of: &bigN) { nonceBytes.replaceSubrange(8..<12, with: $0) }
-        let nonce = try AES.GCM.Nonce(data: nonceBytes)
+        // Sub-Step SM.4: CSPRNG 96-bit (12-byte) random nonce generation
+        var nonceBytes = [UInt8](repeating: 0, count: 12)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 12, &nonceBytes)
+        let nonceData = Data(nonceBytes)
+        let nonce = try AES.GCM.Nonce(data: nonceData)
 
         let aad = header.toAADData()
         let sealedBox = try AES.GCM.seal(paddedPayload, using: mk, nonce: nonce, authenticating: aad)
@@ -175,7 +200,7 @@ public class DoubleRatchetSession {
         return EncryptedEnvelope(
             header: header,
             ciphertext: sealedBox.ciphertext.base64EncodedString() + sealedBox.tag.base64EncodedString(),
-            nonce: nonceBytes.base64EncodedString()
+            nonce: nonceData.base64EncodedString()
         )
     }
 
@@ -328,7 +353,7 @@ public class DoubleRatchetSession {
         let derived = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: dhData),
             salt: rk.withUnsafeBytes { Data($0) },
-            info: "AnonChat_DoubleRatchet_RootKDF".data(using: .utf8)!,
+            info: "DoubleRatchet".data(using: .utf8)!,
             outputByteCount: 64
         )
 

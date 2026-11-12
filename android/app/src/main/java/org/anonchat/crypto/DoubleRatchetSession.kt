@@ -140,7 +140,8 @@ class DoubleRatchetSession private constructor(
 
         private fun kdfRk(rk: ByteArray, dhOut: ByteArray): Pair<ByteArray, ByteArray> {
             val hkdf = HKDFBytesGenerator(SHA256Digest())
-            hkdf.init(HKDFParameters(dhOut, rk, "AnonChat_DoubleRatchet_RootKDF".toByteArray(Charsets.UTF_8)))
+            // Sub-Step SM.4: Standard Signal Double Ratchet KDF info string ("DoubleRatchet")
+            hkdf.init(HKDFParameters(dhOut, rk, "DoubleRatchet".toByteArray(Charsets.UTF_8)))
             val okm = ByteArray(64)
             hkdf.generateBytes(okm, 0, 64)
             val newRk = okm.copyOfRange(0, 32)
@@ -172,10 +173,22 @@ class DoubleRatchetSession private constructor(
     ) {
         fun toJsonBytes(): ByteArray {
             val obj = JSONObject()
-            obj.put("dh_pub", dhPub)
+            // Sub-Step SM.4: Canonical Signal Double Ratchet header format (dh, pn, n)
+            obj.put("dh", dhPub)
             obj.put("pn", pn)
             obj.put("n", n)
             return obj.toString().toByteArray(Charsets.UTF_8)
+        }
+
+        companion object {
+            fun fromJson(json: JSONObject): Header {
+                val dh = if (json.has("dh")) json.getString("dh") else json.getString("dh_pub")
+                return Header(
+                    dhPub = dh,
+                    pn = json.getInt("pn"),
+                    n = json.getInt("n")
+                )
+            }
         }
     }
 
@@ -186,8 +199,9 @@ class DoubleRatchetSession private constructor(
     ) {
         fun toJson(): JSONObject {
             return JSONObject().apply {
+                put("v", 1)
                 put("header", JSONObject().apply {
-                    put("dh_pub", header.dhPub)
+                    put("dh", header.dhPub)
                     put("pn", header.pn)
                     put("n", header.n)
                 })
@@ -217,9 +231,9 @@ class DoubleRatchetSession private constructor(
 
         val paddedPlaintext = padTo4KB(plaintext)
 
-        // AES-256-GCM encryption with 96-bit nonce
+        // Sub-Step SM.4: CSPRNG 96-bit (12-byte) random nonce generation (no custom counter nonce)
         val nonce = ByteArray(12)
-        ByteBuffer.wrap(nonce).putInt(8, header.n)
+        secureRandom.nextBytes(nonce)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val keySpec = SecretKeySpec(mk, "AES")

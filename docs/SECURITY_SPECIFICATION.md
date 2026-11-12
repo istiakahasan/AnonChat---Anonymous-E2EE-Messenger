@@ -599,6 +599,41 @@ All client platforms implement explicit durable persist-before-release guards:
 
 ---
 
+### 5.16 Sub-Step SM.4: "Do Not Invent Your Own Protocol" Enforcement
+
+AnonChat strictly adheres to vetted, standardized cryptographic protocols (Signal Protocol, RFC 7748, RFC 8032, RFC 5869, RFC 9106) rather than inventing custom cryptographic constructions.
+
+#### 1. Codebase Protocol-Invention Audit Matrix
+
+| Security Rule | Status | Audit Findings & Standardizations Applied |
+| :--- | :--- | :--- |
+| **No Custom KDF** | **ENFORCED** | **Double Ratchet Root KDF**: HKDF-SHA256 strictly uses `info = "DoubleRatchet"` and 64-byte expand across all targets. Fixed legacy non-standard info strings in Android and iOS.<br>**Chain KDF**: HMAC-SHA256 strictly uses single-byte constants `0x01` (Message Key) and `0x02` (Chain Key). No non-standard KDF constructions exist. |
+| **No Custom Ratchet Logic** | **ENFORCED** | Chain key advancement and message key derivation are restricted strictly to library-level `encrypt()` and `decrypt()` functions (plus internal bounded skip loops). Removed custom out-of-band `onMessageReceived()` method from Flutter. |
+| **No Custom Header Format** | **ENFORCED** | Canonical header layout is strictly `{ "dh": base64_pubkey, "pn": uint32, "n": uint32 }`, adhering to Signal Double Ratchet Specification Section 3.2. Removed non-standard extra fields (`dh_pub` keys in serialization) across Android, iOS, Dart, and Python. |
+| **No Custom Nonce Generation** | **ENFORCED** | Every 96-bit (12-byte) AES-256-GCM nonce is sourced strictly from platform CSPRNGs (`OsRng`, `crypto.getRandomValues`, `Random.secure()`, `SecureRandom`, `SecRandomCopyBytes`, `secrets.token_bytes`). Replaced legacy deterministic counter nonces (`00000000 \|\| n`) in Kotlin and Swift. |
+| **No Custom Key Verification** | **ENFORCED** | Safety Numbers strictly execute 5,200 iterations of SHA-512 over sorted identity key fingerprints, generating 60 numeric digits formatted into twelve 5-digit groups. Naive SHA-256 hashes or direct string comparisons are forbidden for identity verification. |
+
+#### 2. Acceptable Integration Work vs. Unacceptable Work
+
+- **Acceptable Integration Boundaries**:
+  - Calling `encrypt()` and `decrypt()` from the cryptographic library.
+  - Persisting serialized session state returned by the library with durable fsync / `synchronous = FULL`.
+  - Handling cryptographic error conditions (`DecryptionFailed`, `DuplicateOrOldMessage`, `GapTooLarge`, `UntrustedIdentity`).
+  - Managing session lifecycle (create on X3DH completion, update on message ratchet, destroy/wipe on contact deletion).
+- **Unacceptable Protocol Inventions**:
+  - Implementing custom asymmetric key exchanges or hybrid handshakes without standardized X3DH.
+  - Manually advancing chain keys or skipping keys outside the ratchet state machine.
+  - Modifying wire format headers or packet envelopes to include unauthenticated or plaintext metadata.
+  - Deriving nonces from predictable counters, timestamps, or sequential numbers.
+
+#### 3. Mandatory Code Review Audit Policy
+For every cryptographic primitive, function, and parameter in the repository, code review mandates the following operational gate:
+> **Code Review Question**: *"Is this function from a library, or did I write it?"*
+>
+> If the answer is *"I wrote it,"* the construction is classified as custom protocol logic and requires an independent formal security audit and cryptographic verification before production release.
+
+---
+
 ## 6. Avoid Backup Side Channels
 
 ### 6.1 Threat Model: Size-Based Side Channels
