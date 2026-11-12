@@ -472,6 +472,56 @@ key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
   2. **Domain Separation & Salt Independence**: A fresh 16-byte random salt per backup guarantees that multiple backups generated with the same recovery code produce completely independent symmetric keys.
   3. **Defense-in-Depth**: Memory-hard Argon2id execution ensures maximum resistance against physical extraction and offline attacks.
 
+---
+
+## 6. Avoid Backup Side Channels
+
+### 6.1 Threat Model: Size-Based Side Channels
+If encrypted backup sizes vary with plaintext contents, an adversary observing cloud storage or network transmissions can infer:
+- Message volume, conversation length, and activity patterns.
+- Presence or absence of specific media attachments or documents.
+- File types and language entropy (via compression-before-encryption, demonstrated in the WhatsApp backup attacks [citation:22]).
+
+**Core Security Invariant**: The ciphertext size must not leak information about the plaintext content.
+
+---
+
+### 6.2 Sub-Step 6.1: Fixed-Block Padding (Post-Encryption)
+
+After producing the complete encrypted container (`header || ciphertext`), the entire file is padded to a fixed block size (default: **64 KiB = 65,536 bytes**) with zeroes (`0x00`).
+
+#### Padding Algorithm:
+```rust
+fn pad_to_block_size(data: Vec<u8>, block_size: usize) -> Vec<u8> {
+    let pad_len = block_size - (data.len() % block_size);
+    // Always pad, even if already aligned, to avoid leaking exact size
+    let pad_len = if pad_len == 0 { block_size } else { pad_len };
+    let mut padded = data;
+    padded.extend(std::iter::repeat(0x00).take(pad_len));
+    padded
+}
+```
+
+#### Key Invariants:
+1. **Always-Pad Invariant**: Even if `data.len()` is already an exact multiple of `block_size`, an additional `block_size` bytes of padding are appended. This guarantees that an adversary cannot deduce that a backup was already aligned.
+2. **Payload Boundary Isolation**: The 42-byte header explicitly declares `ciphertext_len`. On restore, the decryptor reads exactly `header.ciphertext_len` bytes starting at offset 42, authenticates the AES-256-GCM tag, and safely ignores the trailing padding zeroes.
+3. **Tamper Independence**: Because the GCM authentication tag covers only the ciphertext body and the 38-byte AAD header, trailing padding bytes cannot be manipulated to alter the decrypted plaintext.
+
+---
+
+### 6.3 Forbidden-Features Checklist
+
+To eliminate side-channel vulnerabilities across all client platforms, the following features are strictly prohibited:
+
+| Prohibited Feature | Attack Prevented | Implementation Rule |
+| :--- | :--- | :--- |
+| **No Compression Before Encryption** | CRIME / BREACH / WhatsApp file-recovery attacks [citation:22] where compression ratio leaks plaintext vocabulary and redundancy. | Backups must NEVER pass plaintext through `gzip`, `zlib`, `brotli`, or `deflate` before encryption. |
+| **No Cross-Backup Deduplication** | Confirmation attacks probing whether a target owns specific messages or files via convergent encryption. | Every backup MUST generate a fresh, cryptographically secure 16-byte random salt and 12-byte nonce. |
+| **No Variable-Length Headers** | Metadata leakage revealing username length, conversation count, or device tags. | Container header is strictly fixed at 42 bytes (little-endian binary). |
+| **No Unpadded File Sizes** | Activity pattern leakage and file size fingerprinting. | All stored/uploaded backups MUST be padded to a multiple of 64 KiB. |
+| **No Detailed Error Messages** | Padding oracle and chosen-ciphertext side channels. | Any decryption or authentication failure must produce the identical uniform error string: `"Incorrect passphrase or corrupted backup file."` |
+
+
 
 
 

@@ -35,6 +35,9 @@ const int maxAllowedMemoryExponent = 20; // 1 << 20 KiB = 1 GiB
 const int maxAllowedTimeCost = 10;
 const int maxAllowedParallelism = 4;
 
+/// Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1).
+const int defaultBackupBlockSize = 65536;
+
 /// Enforces passphrase policy before key derivation:
 /// - Automatically recognizes and validates high-entropy recovery codes (24 BIP39 words or 52 Base32 characters).
 /// - For custom passphrases: minimum 12 characters, character diversity, and monotonic pattern rejection.
@@ -289,7 +292,14 @@ class BackupContainer {
     return out;
   }
 
-  /// Parses and validates a container from raw file bytes
+  /// Serializes container with post-encryption fixed-block padding (Sub-Step 6.1).
+  /// Pads entire file to a multiple of [blockSize] (default 64 KiB) using 0x00 zeroes.
+  Uint8List toPaddedBytes([int blockSize = defaultBackupBlockSize]) {
+    return padToBlockSize(toBytes(), blockSize);
+  }
+
+  /// Parses and validates a container from raw file bytes.
+  /// Trailing post-encryption padding zeroes are safely ignored.
   factory BackupContainer.fromBytes(Uint8List bytes) {
     if (bytes.length < backupHeaderSize) {
       throw FormatException('Backup file truncated: expected at least $backupHeaderSize bytes');
@@ -410,4 +420,26 @@ class BackupContainer {
 /// Displayed after upload without a success checkmark that implies the server can assist with recovery.
 const String backupUploadConfirmation =
     'Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it.';
+
+/// Pads encrypted backup container bytes to a fixed block size (Sub-Step 6.1).
+///
+/// Security Principle: The ciphertext size must not leak information about plaintext content.
+/// After producing header || ciphertext, pads the entire file to a fixed block size.
+/// Always pads at least 1 byte (up to [blockSize]), even if data is already aligned.
+Uint8List padToBlockSize(Uint8List data, int blockSize) {
+  if (blockSize <= 0) {
+    throw ArgumentError('blockSize must be positive');
+  }
+  var padLen = blockSize - (data.length % blockSize);
+  if (padLen == 0) padLen = blockSize;
+  final padded = Uint8List(data.length + padLen);
+  padded.setRange(0, data.length, data);
+  // Trailing padLen bytes remain 0x00
+  return padded;
+}
+
+/// Convenience function to pad backup bytes to the default 64 KiB block size.
+Uint8List padBackup(Uint8List data) {
+  return padToBlockSize(data, defaultBackupBlockSize);
+}
 

@@ -33,6 +33,9 @@ public struct BackupContainer {
     public static let maxAllowedTimeCost: UInt8 = 10
     public static let maxAllowedParallelism: UInt8 = 4
 
+    // Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1)
+    public static let defaultBackupBlockSize: Int = 65536
+
     // Client-Side Confirmation Invariant (no success checkmark)
     public static let backupUploadConfirmation: String =
         "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
@@ -392,6 +395,28 @@ public struct BackupContainer {
         } catch {
             throw BackupError.decryptionFailed
         }
+    }
+
+    /// Serializes container with post-encryption fixed-block padding (Sub-Step 6.1).
+    /// Pads entire file to a multiple of [blockSize] (default 64 KiB) using 0x00 zeroes.
+    public func toPaddedData(blockSize: Int = BackupContainer.defaultBackupBlockSize) -> Data {
+        return BackupContainer.padToBlockSize(data: toData(), blockSize: blockSize)
+    }
+
+    /// Pads encrypted backup container bytes to a fixed block size (Sub-Step 6.1).
+    /// Security Principle: Ciphertext size must not leak information about plaintext content.
+    /// Always pads at least 1 byte (up to [blockSize]), even if data is already aligned.
+    public static func padToBlockSize(data: Data, blockSize: Int = defaultBackupBlockSize) -> Data {
+        precondition(blockSize > 0, "blockSize must be positive")
+        var padLen = blockSize - (data.count % blockSize)
+        if padLen == 0 { padLen = blockSize }
+        var padded = data
+        padded.append(contentsOf: [UInt8](repeating: 0x00, count: padLen))
+        return padded
+    }
+
+    public static func padBackup(data: Data) -> Data {
+        return padToBlockSize(data: data, blockSize: defaultBackupBlockSize)
     }
 }
 

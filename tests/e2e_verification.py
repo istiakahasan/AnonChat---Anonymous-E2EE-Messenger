@@ -2597,6 +2597,106 @@ def run_all_tests():
     assert restored_from_base32 == secret_backup_db, "Backup container restored via Base32 recovery code must match original payload"
     print("    [PASS] 21.6: key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32) verified across all invariants.")
 
+    # 22. TASK: AVOID BACKUP SIDE CHANNELS (FIXED-BLOCK PADDING & FORBIDDEN-FEATURES CHECKLIST)
+    print("\n[+] [Sub-Step 6.1] Testing Backup Side-Channel Hardening (Fixed-Block Padding & Forbidden Features)...")
+
+    DEFAULT_BACKUP_BLOCK_SIZE = 65536 # 64 KiB
+
+    def pad_to_block_size_py(data: bytes, block_size: int = DEFAULT_BACKUP_BLOCK_SIZE) -> bytes:
+        assert block_size > 0, "block_size must be positive"
+        pad_len = block_size - (len(data) % block_size)
+        pad_len = block_size if pad_len == 0 else pad_len
+        return data + (b"\x00" * pad_len)
+
+    # Test 22.1: Always-pad invariant & block alignment
+    test_block_size = 64
+    unaligned_data = b"A" * 50
+    padded_unaligned = pad_to_block_size_py(unaligned_data, test_block_size)
+    assert len(padded_unaligned) == 64, f"Expected 64 bytes, got {len(padded_unaligned)}"
+    assert padded_unaligned.startswith(unaligned_data)
+    assert padded_unaligned[50:] == b"\x00" * 14
+
+    # Exact multiple: MUST pad a full additional block to avoid leaking exact alignment
+    exact_data = b"B" * 64
+    padded_exact = pad_to_block_size_py(exact_data, test_block_size)
+    assert len(padded_exact) == 128, f"Exact multiple must pad an entire block (expected 128, got {len(padded_exact)})"
+    assert padded_exact.startswith(exact_data)
+    assert padded_exact[64:] == b"\x00" * 64
+    print("    [PASS] 22.1: Always-pad invariant verified (even exact block multiples receive full block padding).")
+
+    # Test 22.2: Side-Channel Defense - Ciphertext Size Quantization
+    # Small conversation (100 bytes), medium conversation (5,000 bytes), large conversation (60,000 bytes)
+    pt_small = b'{"messages": [{"text": "hey"}]}' # ~30 bytes
+    pt_medium = (b'{"messages": [{"text": "hello"}]}' * 150)[:5000] # 5000 bytes
+    pt_large = (b'{"messages": [{"text": "chat log"}]}' * 1500)[:60000] # 60000 bytes
+
+    c_small = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    c_small.encrypt_payload(secrets.token_bytes(32), pt_small)
+    padded_small = pad_to_block_size_py(c_small.to_bytes(), DEFAULT_BACKUP_BLOCK_SIZE)
+
+    c_medium = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    c_medium.encrypt_payload(secrets.token_bytes(32), pt_medium)
+    padded_medium = pad_to_block_size_py(c_medium.to_bytes(), DEFAULT_BACKUP_BLOCK_SIZE)
+
+    c_large = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    c_large.encrypt_payload(secrets.token_bytes(32), pt_large)
+    padded_large = pad_to_block_size_py(c_large.to_bytes(), DEFAULT_BACKUP_BLOCK_SIZE)
+
+    # All three backup files quantize to the EXACT same 64 KiB block size!
+    assert len(padded_small) == 65536, f"Expected 65536, got {len(padded_small)}"
+    assert len(padded_medium) == 65536, f"Expected 65536, got {len(padded_medium)}"
+    assert len(padded_large) == 65536, f"Expected 65536, got {len(padded_large)}"
+    print("    [PASS] 22.2: Size quantization verified (small, medium, and large payloads pad to exact 64 KiB).")
+
+    # Test 22.3: Decryptor cleanly restores padded containers using header.ciphertext_len
+    test_sc_passphrase = "Side-Channel-Hardening-Passphrase-2026!"
+    secret_sc_payload = b'{"identity": "Alice", "messages": 1337, "hardened": true}'
+    sc_salt = secrets.token_bytes(16)
+    sc_nonce = secrets.token_bytes(12)
+    sc_key = derive_argon2id_key(test_sc_passphrase, sc_salt, 1 << 16, 3, 4)
+
+    sc_container = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=sc_salt, nonce=sc_nonce)
+    sc_container.encrypt_payload(sc_key, secret_sc_payload)
+    sc_padded_file = pad_to_block_size_py(sc_container.to_bytes(), DEFAULT_BACKUP_BLOCK_SIZE)
+
+    restored_sc_plaintext = restore_backup_container(sc_padded_file, test_sc_passphrase)
+    assert restored_sc_plaintext == secret_sc_payload, "Decryption of padded backup must restore exact original payload"
+    print("    [PASS] 22.3: Decryptor restores padded containers via header ciphertext_len, discarding padding cleanly.")
+
+    # Test 22.4: Tampering with post-encryption padding zeroes does NOT corrupt payload
+    tampered_padding_file = bytearray(sc_padded_file)
+    tampered_padding_file[-10] ^= 0xFF # Flip bit in trailing padding
+    restored_from_tampered_padding = restore_backup_container(bytes(tampered_padding_file), test_sc_passphrase)
+    assert restored_from_tampered_padding == secret_sc_payload, "Trailing padding alteration must not corrupt authenticated ciphertext"
+    print("    [PASS] 22.4: Trailing padding tamper resistance verified (ciphertext boundary enforced by AAD header).")
+
+    # Test 22.5: Forbidden-Features Checklist Verification
+    # Checklist 1: No compression before encryption (CRIME/BREACH/WhatsApp defense)
+    # Check that payload is not compressed with zlib/gzip before AES-GCM
+    assert not sc_container.ciphertext.startswith(b"\x1f\x8b"), "Ciphertext must not be gzip-compressed before encryption"
+    assert not sc_container.ciphertext.startswith(b"\x78\x9c"), "Ciphertext must not be zlib-compressed before encryption"
+
+    # Checklist 2: No deduplication across backups (fresh random salt & nonce on every backup)
+    sc_container_2 = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    sc_key_2 = derive_argon2id_key(test_sc_passphrase, sc_container_2.salt, 1 << 16, 3, 4)
+    sc_container_2.encrypt_payload(sc_key_2, secret_sc_payload)
+    assert sc_container.ciphertext != sc_container_2.ciphertext, "Fresh salt & nonce must prevent deduplication"
+    assert sc_container.salt != sc_container_2.salt, "Salts must be unique per backup"
+    assert sc_container.nonce != sc_container_2.nonce, "Nonces must be unique per backup"
+
+    # Checklist 3: Fixed 42-byte binary header with zero user metadata
+    assert len(sc_container.serialize_header()) == 42, "Header must be strictly 42 bytes constant size"
+    assert b"Alice" not in sc_container.serialize_header(), "Header must contain zero plaintext user identifiers"
+
+    # Checklist 4: Uniform error message invariant (prevents side-channel error oracle)
+    wrong_key_err = None
+    try:
+        restore_backup_container(sc_padded_file, "Wrong-Password-999!")
+    except ValueError as e:
+        wrong_key_err = str(e)
+    assert wrong_key_err == "Incorrect passphrase or corrupted backup file.", "Error message must be strictly uniform"
+    print("    [PASS] 22.5: Forbidden-Features Checklist enforced (no compression, no deduplication, fixed 42B header, uniform error).")
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")

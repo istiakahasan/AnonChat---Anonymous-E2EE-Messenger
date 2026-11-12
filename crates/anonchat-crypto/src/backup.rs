@@ -79,6 +79,9 @@ pub const MAX_ALLOWED_MEMORY_EXPONENT: u8 = 20; // 1 << 20 KiB = 1,048,576 KiB =
 pub const MAX_ALLOWED_TIME_COST: u8 = 10;
 pub const MAX_ALLOWED_PARALLELISM: u8 = 4;
 
+/// Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1).
+pub const DEFAULT_BACKUP_BLOCK_SIZE: usize = 65536;
+
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum BackupContainerError {
     #[error("Header too short: expected at least 42 bytes, got {0}")]
@@ -593,7 +596,17 @@ impl BackupContainer {
         out
     }
 
+    /// Serializes container into a single contiguous byte buffer with post-encryption fixed-block padding:
+    /// `[42-byte header] + [N-byte ciphertext] + [padding zeroes to block_size]`
+    ///
+    /// Hardening against size-based side-channel attacks (Sub-Step 6.1):
+    /// Pads the entire file to a multiple of `block_size` (default: 64 KiB) using 0x00 zeroes.
+    pub fn to_padded_bytes(&self, block_size: usize) -> Vec<u8> {
+        pad_to_block_size(self.to_bytes(), block_size)
+    }
+
     /// Parses and validates a container from raw file bytes.
+    /// Trailing post-encryption padding bytes are safely ignored using `header.ciphertext_len`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BackupContainerError> {
         if bytes.len() < BACKUP_HEADER_SIZE {
             return Err(BackupContainerError::HeaderTooShort(bytes.len()));
@@ -612,6 +625,28 @@ impl BackupContainer {
         let ciphertext = bytes[BACKUP_HEADER_SIZE..expected_total_len].to_vec();
         Ok(Self { header, ciphertext })
     }
+}
+
+/// Pads encrypted backup container bytes to a fixed block size (Sub-Step 6.1).
+///
+/// # Security Principle:
+/// The ciphertext size must not leak information about plaintext content.
+/// After producing `header || ciphertext`, pads the entire file to a fixed block size.
+/// Always pads at least 1 byte (up to `block_size`), even if data is already aligned,
+/// avoiding any leakage of exact file size.
+pub fn pad_to_block_size(data: Vec<u8>, block_size: usize) -> Vec<u8> {
+    assert!(block_size > 0, "block_size must be positive");
+    let pad_len = block_size - (data.len() % block_size);
+    // Always pad, even if already aligned, to avoid leaking exact size
+    let pad_len = if pad_len == 0 { block_size } else { pad_len };
+    let mut padded = data;
+    padded.extend(std::iter::repeat(0x00).take(pad_len));
+    padded
+}
+
+/// Convenience function to pad backup bytes to the default 64 KiB block size.
+pub fn pad_backup(data: Vec<u8>) -> Vec<u8> {
+    pad_to_block_size(data, DEFAULT_BACKUP_BLOCK_SIZE)
 }
 
 #[cfg(test)]
@@ -765,6 +800,53 @@ mod tests {
             restored.decrypt_with_passphrase("Incorrect-Password-999!"),
             Err(BackupContainerError::DecryptionFailed)
         );
+    }
+
+    #[test]
+    fn test_pad_to_block_size_always_pads() {
+        let block_size = 64;
+
+        // 1. Unaligned data: 50 bytes -> pads 14 bytes of 0x00 to reach 64 bytes
+        let data = vec![0x42; 50];
+        let padded = pad_to_block_size(data.clone(), block_size);
+        assert_eq!(padded.len(), 64);
+        assert_eq!(&padded[0..50], &data[..]);
+        assert_eq!(&padded[50..64], &[0x00; 14]);
+
+        // 2. Exact multiple of block size (64 bytes): must STILL pad 64 bytes to reach 128 bytes!
+        // This invariant ensures an attacker cannot distinguish exact alignments.
+        let data_exact = vec![0x42; 64];
+        let padded_exact = pad_to_block_size(data_exact.clone(), block_size);
+        assert_eq!(padded_exact.len(), 128);
+        assert_eq!(&padded_exact[0..64], &data_exact[..]);
+        assert_eq!(&padded_exact[64..128], &[0x00; 64]);
+    }
+
+    #[test]
+    fn test_backup_container_padded_restore() {
+        let key = [0x55u8; 32];
+        let plaintext = b"Confidential chat database with side-channel padding defense";
+        let container = BackupContainer::encrypt(&key, plaintext, 1, 6, 1).unwrap();
+
+        let raw_bytes = container.to_bytes();
+        let padded_bytes = container.to_padded_bytes(DEFAULT_BACKUP_BLOCK_SIZE);
+
+        // Padded length is a strict multiple of 64 KiB
+        assert_eq!(padded_bytes.len() % DEFAULT_BACKUP_BLOCK_SIZE, 0);
+        assert!(padded_bytes.len() > raw_bytes.len());
+
+        // from_bytes parses cleanly by respecting header.ciphertext_len
+        let restored_container = BackupContainer::from_bytes(&padded_bytes).unwrap();
+        let decrypted = restored_container.decrypt(&key).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        // Tampering with trailing padding zeroes does not corrupt payload decryption
+        let mut tampered_padding = padded_bytes.clone();
+        let last_idx = tampered_padding.len() - 1;
+        tampered_padding[last_idx] ^= 0xFF;
+        let restored_tampered = BackupContainer::from_bytes(&tampered_padding).unwrap();
+        let decrypted_tampered = restored_tampered.decrypt(&key).unwrap();
+        assert_eq!(decrypted_tampered, plaintext);
     }
 }
 

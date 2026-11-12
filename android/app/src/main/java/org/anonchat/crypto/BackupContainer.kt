@@ -44,6 +44,9 @@ object BackupContainer {
     const val MAX_ALLOWED_TIME_COST: Byte = 10
     const val MAX_ALLOWED_PARALLELISM: Byte = 4
 
+    // Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1)
+    const val DEFAULT_BACKUP_BLOCK_SIZE = 65536
+
     // Client-Side Confirmation Invariant (no success checkmark)
     const val BACKUP_UPLOAD_CONFIRMATION =
         "Backup encrypted and uploaded. Your passphrase is the only way to restore it. We cannot recover it if you forget it."
@@ -411,6 +414,25 @@ object BackupContainer {
         } finally {
             java.util.Arrays.fill(key, 0.toByte())
         }
+    }
+
+    /**
+     * Pads encrypted backup container bytes to a fixed block size (Sub-Step 6.1).
+     * Security Principle: Ciphertext size must not leak information about plaintext content.
+     * Always pads at least 1 byte (up to [blockSize]), even if data is already aligned.
+     */
+    fun padToBlockSize(data: ByteArray, blockSize: Int = DEFAULT_BACKUP_BLOCK_SIZE): ByteArray {
+        require(blockSize > 0) { "blockSize must be positive" }
+        var padLen = blockSize - (data.size % blockSize)
+        if (padLen == 0) padLen = blockSize
+        val padded = ByteArray(data.size + padLen)
+        System.arraycopy(data, 0, padded, 0, data.size)
+        // Trailing padLen bytes remain 0x00
+        return padded
+    }
+
+    fun padBackup(data: ByteArray): ByteArray {
+        return padToBlockSize(data, DEFAULT_BACKUP_BLOCK_SIZE)
     }
 }
 

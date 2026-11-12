@@ -32,6 +32,32 @@ export const MAX_ALLOWED_MEMORY_EXPONENT = 20; // 1 << 20 KiB = 1 GiB
 export const MAX_ALLOWED_TIME_COST = 10;
 export const MAX_ALLOWED_PARALLELISM = 4;
 
+/// Default block size for post-encryption backup padding (64 KiB = 65,536 bytes) (Sub-Step 6.1).
+export const DEFAULT_BACKUP_BLOCK_SIZE = 65536;
+
+/**
+ * Pads encrypted backup container bytes to a fixed block size (Sub-Step 6.1).
+ * Security Principle: Ciphertext size must not leak information about plaintext content.
+ * Always pads at least 1 byte (up to blockSize), even if data is already aligned.
+ */
+export function padToBlockSize(
+  data: Uint8Array,
+  blockSize: number = DEFAULT_BACKUP_BLOCK_SIZE
+): Uint8Array {
+  if (blockSize <= 0) {
+    throw new Error('blockSize must be positive');
+  }
+  let padLen = blockSize - (data.length % blockSize);
+  if (padLen === 0) padLen = blockSize;
+  const padded = new Uint8Array(data.length + padLen);
+  padded.set(data, 0);
+  return padded;
+}
+
+export function padBackup(data: Uint8Array): Uint8Array {
+  return padToBlockSize(data, DEFAULT_BACKUP_BLOCK_SIZE);
+}
+
 export interface BackupHeader {
   magic: Uint8Array;
   version: number;
