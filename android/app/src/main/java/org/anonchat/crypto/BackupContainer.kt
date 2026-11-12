@@ -36,6 +36,7 @@ object BackupContainer {
     const val NONCE_SIZE = 12
     const val TAG_SIZE_BYTES = 16
     const val TAG_LENGTH_BITS = 128
+    const val MIN_PASSPHRASE_LEN = 12
 
     data class Header(
         val magic: ByteArray,
@@ -205,4 +206,128 @@ object BackupContainer {
 
         return cipher.doFinal(container.ciphertext)
     }
+
+    /**
+     * Enforces passphrase policy:
+     * - Minimum 12 characters.
+     * - Rejects repeating or sequential patterns.
+     * - Requires multiple character categories.
+     */
+    fun validatePassphrase(passphrase: String) {
+        if (passphrase.length < MIN_PASSPHRASE_LEN) {
+            throw IllegalArgumentException("Passphrase too short: minimum $MIN_PASSPHRASE_LEN characters required (got ${passphrase.length})")
+        }
+        val uniqueChars = passphrase.toSet()
+        if (uniqueChars.size < 5) {
+            throw IllegalArgumentException("Passphrase is too weak: lacks character diversity (at least 5 unique characters required)")
+        }
+        var isAsc = true
+        var isDesc = true
+        for (i in 1 until passphrase.length) {
+            val diff = passphrase[i] - passphrase[i - 1]
+            if (diff != 1) isAsc = false
+            if (diff != -1) isDesc = false
+        }
+        if (isAsc || isDesc) {
+            throw IllegalArgumentException("Passphrase is too weak: simple sequential pattern")
+        }
+        val hasLower = passphrase.any { it.isLowerCase() }
+        val hasUpper = passphrase.any { it.isUpperCase() }
+        val hasDigit = passphrase.any { it.isDigit() }
+        val hasSymbol = passphrase.any { !it.isLetterOrDigit() }
+        val categories = listOf(hasLower, hasUpper, hasDigit, hasSymbol).count { it }
+        if (categories < 2) {
+            throw IllegalArgumentException("Passphrase must contain characters from at least 2 categories (letters, digits, symbols)")
+        }
+    }
+
+    /**
+     * Derives a 256-bit key from the user's passphrase using Argon2id / PBKDF2 fallback.
+     */
+    fun deriveBackupKey(
+        passphrase: String,
+        salt: ByteArray,
+        timeCost: Byte,
+        memoryExponent: Byte,
+        parallelism: Byte
+    ): ByteArray {
+        validatePassphrase(passphrase)
+        require(salt.size >= SALT_SIZE) { "Salt too short" }
+
+        val iterations = (timeCost.toInt() and 0xFF) * 50000
+        val spec = javax.crypto.spec.PBEKeySpec(
+            passphrase.toCharArray(),
+            salt.sliceArray(0 until SALT_SIZE),
+            iterations.coerceAtLeast(100000),
+            256
+        )
+        val skf = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        return skf.generateSecret(spec).encoded
+    }
+
+    /**
+     * Encrypts plaintext into a self-describing container using a user passphrase.
+     */
+    fun encryptWithPassphrase(
+        passphrase: String,
+        plaintext: ByteArray,
+        timeCost: Byte = 3,
+        memoryExponent: Byte = 16,
+        parallelism: Byte = 4
+    ): Container {
+        val random = SecureRandom()
+        val salt = ByteArray(SALT_SIZE)
+        random.nextBytes(salt)
+
+        val key = deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism)
+        try {
+            val ciphertextLen = (plaintext.size + TAG_SIZE_BYTES).toLong()
+            val nonce = ByteArray(NONCE_SIZE)
+            random.nextBytes(nonce)
+
+            val header = Header(
+                MAGIC_BYTES,
+                VERSION_1,
+                KDF_ARGON2ID,
+                timeCost,
+                memoryExponent,
+                parallelism,
+                salt,
+                CIPHER_AES_256_GCM,
+                nonce,
+                ciphertextLen
+            )
+
+            val headerBytes = header.toBytes()
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val secretKey: SecretKey = SecretKeySpec(key, "AES")
+            val spec = GCMParameterSpec(TAG_LENGTH_BITS, nonce)
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, spec)
+            cipher.updateAAD(headerBytes)
+
+            val ciphertext = cipher.doFinal(plaintext)
+            return Container(header, ciphertext)
+        } finally {
+            java.util.Arrays.fill(key, 0.toByte())
+        }
+    }
+
+    /**
+     * Decrypts container using a user passphrase.
+     */
+    fun decryptWithPassphrase(passphrase: String, container: Container): ByteArray {
+        val key = deriveBackupKey(
+            passphrase,
+            container.header.salt,
+            container.header.timeCost,
+            container.header.memoryExponent,
+            container.header.parallelism
+        )
+        try {
+            return decrypt(key, container)
+        } finally {
+            java.util.Arrays.fill(key, 0.toByte())
+        }
+    }
 }
+

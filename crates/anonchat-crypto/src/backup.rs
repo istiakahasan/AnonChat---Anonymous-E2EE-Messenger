@@ -27,8 +27,13 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand_core::{OsRng, RngCore};
 use thiserror::Error;
+use zeroize::Zeroizing;
+
+/// Minimum passphrase length required to derive backup keys (enforces strong security).
+pub const MIN_PASSPHRASE_LEN: usize = 12;
 
 /// Magic bytes identifying an AnonChat backup container ("ANON").
 pub const BACKUP_MAGIC: [u8; 4] = [0x41, 0x4E, 0x4F, 0x4E];
@@ -84,6 +89,12 @@ pub enum BackupContainerError {
     EncryptionFailed,
     #[error("Argon2 memory exponent too large: 1 << {0} exceeds 64-bit address space")]
     MemoryExponentTooLarge(u8),
+    #[error("Passphrase too short: minimum {MIN_PASSPHRASE_LEN} characters required, got {0}")]
+    PassphraseTooShort(usize),
+    #[error("Passphrase is too weak: {0}")]
+    WeakPassphrase(String),
+    #[error("Argon2 key derivation error: {0}")]
+    KdfError(String),
 }
 
 /// Self-describing header representing the first 42 bytes of an AnonChat backup container.
@@ -226,6 +237,124 @@ impl BackupHeader {
     }
 }
 
+/// Enforces strong passphrase policies before key derivation:
+/// - Minimum 12 characters.
+/// - Rejects identical repeating characters (e.g. "aaaaaaaaaaaa").
+/// - Rejects simple monotonic digit or letter sequences.
+/// - Requires at least 5 unique characters and diversity across character classes.
+pub fn validate_passphrase(passphrase: &str) -> Result<(), BackupContainerError> {
+    if passphrase.len() < MIN_PASSPHRASE_LEN {
+        return Err(BackupContainerError::PassphraseTooShort(passphrase.len()));
+    }
+
+    // Check unique character count
+    let mut unique_chars = std::collections::HashSet::new();
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    let mut has_other = false;
+
+    for ch in passphrase.chars() {
+        unique_chars.insert(ch);
+        if ch.is_ascii_lowercase() {
+            has_lower = true;
+        } else if ch.is_ascii_uppercase() {
+            has_upper = true;
+        } else if ch.is_ascii_digit() {
+            has_digit = true;
+        } else {
+            has_other = true;
+        }
+    }
+
+    if unique_chars.len() < 5 {
+        return Err(BackupContainerError::WeakPassphrase(
+            "Passphrase lacks diversity (at least 5 unique characters required)".into(),
+        ));
+    }
+
+    // Reject monotonic sequences like "123456789012" or "abcdefghijkl"
+    let bytes = passphrase.as_bytes();
+    let mut is_monotonic_asc = true;
+    let mut is_monotonic_desc = true;
+    for i in 1..bytes.len() {
+        if bytes[i] as i32 - bytes[i - 1] as i32 != 1 {
+            is_monotonic_asc = false;
+        }
+        if bytes[i - 1] as i32 - bytes[i] as i32 != 1 {
+            is_monotonic_desc = false;
+        }
+    }
+    if is_monotonic_asc || is_monotonic_desc {
+        return Err(BackupContainerError::WeakPassphrase(
+            "Passphrase is a simple sequential pattern".into(),
+        ));
+    }
+
+    let categories = (has_lower as u8) + (has_upper as u8) + (has_digit as u8) + (has_other as u8);
+    if categories < 2 {
+        return Err(BackupContainerError::WeakPassphrase(
+            "Passphrase must contain at least 2 character categories (letters, digits, or symbols)".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Derives a 256-bit key from the user's passphrase using Argon2id.
+///
+/// # Inputs:
+/// - `passphrase`: string, UTF-8 encoded to bytes. Enforces validation before derivation.
+/// - `salt`: 16 random bytes from a cryptographically secure RNG. Fresh salt per backup.
+/// - `m_cost_kib`: memory_kib = 1 << memory_exponent (from container header).
+/// - `t_cost`: time cost (iterations).
+/// - `p_cost`: parallelism (lanes).
+///
+/// # Output:
+/// - 32-byte key wrapped in `Zeroizing` for automatic zeroization on drop.
+pub fn derive_backup_key(
+    passphrase: &str,
+    salt: &[u8],
+    m_cost_kib: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<Zeroizing<[u8; 32]>, BackupContainerError> {
+    validate_passphrase(passphrase)?;
+
+    if salt.len() < BACKUP_SALT_SIZE {
+        return Err(BackupContainerError::KdfError(format!(
+            "Salt too short: expected {} bytes, got {}",
+            BACKUP_SALT_SIZE,
+            salt.len()
+        )));
+    }
+
+    let params = Params::new(m_cost_kib, t_cost, p_cost, Some(32))
+        .map_err(|e| BackupContainerError::KdfError(e.to_string()))?;
+
+    let mut key = Zeroizing::new([0u8; 32]);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(passphrase.as_bytes(), &salt[0..BACKUP_SALT_SIZE], &mut *key)
+        .map_err(|e| BackupContainerError::KdfError(e.to_string()))?;
+
+    Ok(key)
+}
+
+/// Helper to derive a 256-bit key directly from a `BackupHeader`.
+pub fn derive_key_from_header(
+    passphrase: &str,
+    header: &BackupHeader,
+) -> Result<Zeroizing<[u8; 32]>, BackupContainerError> {
+    let m_cost_kib = header.memory_kib()? as u32;
+    derive_backup_key(
+        passphrase,
+        &header.salt,
+        m_cost_kib,
+        header.time_cost as u32,
+        header.parallelism as u32,
+    )
+}
+
 /// Complete AnonChat Backup Container (42-byte header + N-byte ciphertext).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupContainer {
@@ -291,6 +420,59 @@ impl BackupContainer {
             .map_err(|_| BackupContainerError::DecryptionFailed)?;
 
         Ok(plaintext)
+    }
+
+    /// Encrypts plaintext payload using a user passphrase.
+    ///
+    /// 1. Validates passphrase strength (minimum length & entropy).
+    /// 2. Generates a fresh 16-byte random salt and 12-byte nonce.
+    /// 3. Derives 256-bit AES key using Argon2id with memory_kib = 1 << memory_exponent.
+    /// 4. Authenticates the full 42-byte header as AES-256-GCM AAD.
+    /// 5. Automatically zeroizes the derived key on completion.
+    pub fn encrypt_with_passphrase(
+        passphrase: &str,
+        plaintext: &[u8],
+        time_cost: u8,
+        memory_exponent: u8,
+        parallelism: u8,
+    ) -> Result<Self, BackupContainerError> {
+        let ciphertext_len = (plaintext.len() + BACKUP_TAG_SIZE) as u32;
+        let header = BackupHeader::with_params(time_cost, memory_exponent, parallelism, ciphertext_len);
+
+        let m_cost_kib = header.memory_kib()? as u32;
+        let key = derive_backup_key(
+            passphrase,
+            &header.salt,
+            m_cost_kib,
+            time_cost as u32,
+            parallelism as u32,
+        )?;
+
+        let header_bytes = header.to_bytes();
+        let cipher = Aes256Gcm::new_from_slice(&*key)
+            .map_err(|_| BackupContainerError::EncryptionFailed)?;
+        let nonce = Nonce::from_slice(&header.nonce);
+
+        let payload = Payload {
+            msg: plaintext,
+            aad: &header_bytes,
+        };
+
+        let ciphertext = cipher
+            .encrypt(nonce, payload)
+            .map_err(|_| BackupContainerError::EncryptionFailed)?;
+
+        Ok(Self { header, ciphertext })
+    }
+
+    /// Decrypts container payload using the user passphrase.
+    ///
+    /// Extracts Argon2id parameters (time_cost, memory_exponent, parallelism, salt) from the
+    /// 42-byte header, derives the 256-bit key, and decrypts the ciphertext verifying
+    /// the full header as AAD.
+    pub fn decrypt_with_passphrase(&self, passphrase: &str) -> Result<Vec<u8>, BackupContainerError> {
+        let key = derive_key_from_header(passphrase, &self.header)?;
+        self.decrypt(&*key)
     }
 
     /// Serializes container into a single contiguous byte buffer:
@@ -410,4 +592,70 @@ mod tests {
             Err(BackupContainerError::InvalidMagic(_))
         ));
     }
+
+    #[test]
+    fn test_passphrase_validation_and_argon2id_derivation() {
+        // Test short passphrase rejection (< 12 chars)
+        assert_eq!(
+            validate_passphrase("short123"),
+            Err(BackupContainerError::PassphraseTooShort(8))
+        );
+
+        // Test weak repeating passphrase rejection
+        assert_eq!(
+            validate_passphrase("aaaaaaaaaaaa"),
+            Err(BackupContainerError::WeakPassphrase(
+                "Passphrase lacks diversity (at least 5 unique characters required)".into()
+            ))
+        );
+
+        // Test monotonic sequence rejection
+        assert_eq!(
+            validate_passphrase("123456789012"),
+            Err(BackupContainerError::WeakPassphrase(
+                "Passphrase lacks diversity (at least 5 unique characters required)".into()
+            ))
+        );
+
+        // Valid strong passphrase
+        let valid_passphrase = "Correct-Horse-Battery-Staple-2026!";
+        assert!(validate_passphrase(valid_passphrase).is_ok());
+
+        // Test key derivation with Argon2id parameters
+        let salt = [0x99u8; 16];
+        let key1 = derive_backup_key(valid_passphrase, &salt, 64, 1, 1).unwrap();
+        let key2 = derive_backup_key(valid_passphrase, &salt, 64, 1, 1).unwrap();
+        assert_eq!(*key1, *key2, "Argon2id derivation must be deterministic");
+        assert_eq!(key1.len(), 32, "Key must be exactly 32 bytes (256 bits)");
+
+        // Different salt produces completely different key
+        let salt_diff = [0x88u8; 16];
+        let key3 = derive_backup_key(valid_passphrase, &salt_diff, 64, 1, 1).unwrap();
+        assert_ne!(*key1, *key3, "Different salts must yield different keys");
+
+        // End-to-end passphrase container encryption and decryption
+        let plaintext = b"Confidential SQLite SQLCipher Database Dump";
+        let container = BackupContainer::encrypt_with_passphrase(
+            valid_passphrase,
+            plaintext,
+            1,
+            6, // 1 << 6 = 64 KiB for fast test execution
+            1,
+        ).unwrap();
+
+        // Roundtrip to raw file bytes
+        let file_bytes = container.to_bytes();
+        let restored = BackupContainer::from_bytes(&file_bytes).unwrap();
+
+        // Decrypt with correct passphrase
+        let decrypted = restored.decrypt_with_passphrase(valid_passphrase).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        // Decrypt with wrong passphrase fails authentication
+        assert_eq!(
+            restored.decrypt_with_passphrase("Incorrect-Password-999!"),
+            Err(BackupContainerError::DecryptionFailed)
+        );
+    }
 }
+

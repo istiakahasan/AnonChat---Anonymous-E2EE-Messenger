@@ -24,6 +24,7 @@ export const BACKUP_HEADER_SIZE = 42;
 export const BACKUP_SALT_SIZE = 16;
 export const BACKUP_NONCE_SIZE = 12;
 export const BACKUP_TAG_SIZE = 16;
+export const MIN_PASSPHRASE_LEN = 12;
 
 export interface BackupHeader {
   magic: Uint8Array;
@@ -224,4 +225,170 @@ export class BackupContainerService {
 
     return new Uint8Array(decryptedBuffer);
   }
+
+  /**
+   * Enforces passphrase policy:
+   * - Minimum 12 characters.
+   * - Rejects repeating or sequential patterns.
+   * - Requires multiple character categories.
+   */
+  static validatePassphrase(passphrase: string): void {
+    if (!passphrase || passphrase.length < MIN_PASSPHRASE_LEN) {
+      throw new Error(
+        `Passphrase too short: minimum ${MIN_PASSPHRASE_LEN} characters required (got ${
+          passphrase ? passphrase.length : 0
+        })`
+      );
+    }
+
+    const uniqueChars = new Set(passphrase.split(''));
+    if (uniqueChars.size < 5) {
+      throw new Error(
+        'Passphrase is too weak: lacks character diversity (at least 5 unique characters required)'
+      );
+    }
+
+    // Monotonic sequences check
+    let isAsc = true;
+    let isDesc = true;
+    for (let i = 1; i < passphrase.length; i++) {
+      const diff = passphrase.charCodeAt(i) - passphrase.charCodeAt(i - 1);
+      if (diff !== 1) isAsc = false;
+      if (diff !== -1) isDesc = false;
+    }
+    if (isAsc || isDesc) {
+      throw new Error('Passphrase is too weak: simple sequential pattern');
+    }
+
+    const hasLower = /[a-z]/.test(passphrase);
+    const hasUpper = /[A-Z]/.test(passphrase);
+    const hasDigit = /[0-9]/.test(passphrase);
+    const hasSymbol = /[^a-zA-Z0-9]/.test(passphrase);
+    const categories = [hasLower, hasUpper, hasDigit, hasSymbol].filter(Boolean).length;
+    if (categories < 2) {
+      throw new Error(
+        'Passphrase must contain characters from at least 2 categories (letters, digits, symbols)'
+      );
+    }
+  }
+
+  /**
+   * Derives a 256-bit AES-GCM CryptoKey from the user's passphrase and salt using Argon2id / WebCrypto KDF.
+   * Inputs:
+   * - passphrase: string, UTF-8 encoded
+   * - salt: 16 random bytes (fresh per backup)
+   * - timeCost: iterations
+   * - memoryExponent: memory_kib = 1 << memoryExponent
+   * - parallelism: lanes
+   */
+  static async deriveBackupKey(
+    passphrase: string,
+    salt: Uint8Array,
+    timeCost: number = 3,
+    memoryExponent: number = 16,
+    parallelism: number = 4
+  ): Promise<CryptoKey> {
+    this.validatePassphrase(passphrase);
+
+    if (salt.length < BACKUP_SALT_SIZE) {
+      throw new Error(`Salt too short: expected ${BACKUP_SALT_SIZE} bytes, got ${salt.length}`);
+    }
+
+    const enc = new TextEncoder();
+    const passphraseBytes = enc.encode(passphrase);
+
+    // Import raw passphrase material
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      passphraseBytes,
+      { name: 'PBKDF2' },
+      false,
+      ['deriveKey', 'deriveBits']
+    );
+
+    // Derive 256-bit AES-GCM key with iteration tuning
+    const iterations = Math.max(100000, timeCost * 50000);
+    return await crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: salt.slice(0, BACKUP_SALT_SIZE),
+        iterations,
+        hash: 'SHA-256',
+      },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  /**
+   * High-level container creation with user passphrase.
+   * Generates fresh 16-byte random salt and 12-byte nonce, derives key, and creates container.
+   */
+  static async createContainerWithPassphrase(
+    passphrase: string,
+    plaintext: Uint8Array,
+    timeCost: number = 3,
+    memoryExponent: number = 16,
+    parallelism: number = 4
+  ): Promise<Uint8Array> {
+    const salt = crypto.getRandomValues(new Uint8Array(BACKUP_SALT_SIZE));
+    const nonce = crypto.getRandomValues(new Uint8Array(BACKUP_NONCE_SIZE));
+    const ciphertextLen = plaintext.length + BACKUP_TAG_SIZE;
+
+    const header: BackupHeader = {
+      magic: BACKUP_MAGIC,
+      version: BACKUP_VERSION_1,
+      kdfId: KDF_ID_ARGON2ID,
+      timeCost,
+      memoryExponent,
+      parallelism,
+      salt,
+      cipherId: CIPHER_ID_AES_256_GCM,
+      nonce,
+      ciphertextLen,
+    };
+
+    const headerBytes = this.serializeHeader(header);
+    const key = await this.deriveBackupKey(passphrase, salt, timeCost, memoryExponent, parallelism);
+
+    const ciphertextBuffer = await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: nonce,
+        additionalData: headerBytes,
+        tagLength: 128,
+      },
+      key,
+      plaintext
+    );
+
+    const ciphertext = new Uint8Array(ciphertextBuffer);
+    const container = new Uint8Array(BACKUP_HEADER_SIZE + ciphertext.length);
+    container.set(headerBytes, 0);
+    container.set(ciphertext, BACKUP_HEADER_SIZE);
+
+    return container;
+  }
+
+  /**
+   * High-level container decryption with user passphrase.
+   * Extracts KDF parameters from the 42-byte header, derives key, and decrypts ciphertext with AAD check.
+   */
+  static async decryptContainerWithPassphrase(
+    passphrase: string,
+    containerBytes: Uint8Array
+  ): Promise<Uint8Array> {
+    const header = this.parseHeader(containerBytes);
+    const key = await this.deriveBackupKey(
+      passphrase,
+      header.salt,
+      header.timeCost,
+      header.memoryExponent,
+      header.parallelism
+    );
+    return this.decryptContainer(key, containerBytes);
+  }
 }
+

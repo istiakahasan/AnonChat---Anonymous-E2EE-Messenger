@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+argon2.workspace = true
 x25519-dalek.workspace = true
 ed25519-dalek.workspace = true
 aes-gcm.workspace = true

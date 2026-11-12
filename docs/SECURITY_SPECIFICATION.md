@@ -88,4 +88,20 @@ A naive format of `[salt][nonce][ciphertext]` fails silently when KDF (Argon2id)
 ### 5.3 Cryptographic Integrity (AAD Binding)
 The entire 42-byte header (offsets 0 through 41) is passed as **Additional Authenticated Data (AAD)** to AES-256-GCM during encryption and decryption. Any tampering with KDF parameters, format version, salt, nonce, or payload length causes tag verification to fail immediately with an integrity check error.
 
+### 5.4 Sub-Step 3.2: Argon2id Key Derivation & Passphrase Policies
+
+#### Passphrase Policy Requirements:
+- **Minimum Length**: Enforced $\ge 12$ characters (recommended: 15+ characters).
+- **Entropy & Diversity**: Requires at least 5 distinct characters across at least 2 character categories (lowercase, uppercase, digits, symbols).
+- **Pattern Rejection**: Rejects trivial repeated strings (e.g., `aaaaaaaaaaaa`) and monotonic sequences (e.g., `abcdefghijkl`, `123456789012`) before invoking KDF calculations to conserve device resources and enforce password hygiene.
+
+#### Key Derivation Inputs & Outputs:
+- **Passphrase**: UTF-8 bytes of validated passphrase.
+- **Salt**: 16 cryptographically secure random bytes generated afresh per backup. Salts are **never** reused across backups.
+- **Memory Cost**: $\text{memory\_kib} = 1 \ll \text{memory\_exponent}$ (from header offset 7, default: $1 \ll 16 = 65,536\text{ KiB} = 64\text{ MiB}$).
+- **Time Cost / Iterations**: $t = \text{time\_cost}$ (from header offset 6, default: 3).
+- **Parallelism / Lanes**: $p = \text{parallelism}$ (from header offset 8, default: 4).
+- **Algorithm**: Argon2id, Version `0x13`.
+- **Output**: 32-byte (256-bit) symmetric key, protected by automatic zeroization (`Zeroizing` / secure memory scrubbing) immediately after use.
+
 

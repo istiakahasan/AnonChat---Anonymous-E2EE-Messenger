@@ -15,6 +15,7 @@ use tracing::info;
 use anonchat_client::storage::{StoredContact, StoredMessage};
 use anonchat_client::AnonChatEngine;
 use anonchat_crypto::identity::SecretBytes32;
+use anonchat_crypto::{validate_passphrase, BackupContainer, MIN_PASSPHRASE_LEN};
 
 use crate::qr::generate_qr_image;
 
@@ -93,6 +94,12 @@ pub struct AnonChatApp {
     pub has_key_change_lock: bool,
     pub show_key_change_dialog: bool,
     pub show_accept_warning_modal: bool,
+
+    // Backup Container State
+    pub show_backup_dialog: bool,
+    pub backup_passphrase: String,
+    pub backup_status_msg: Option<(String, bool)>,
+    pub last_backup_container: Option<Vec<u8>>,
 }
 
 impl AnonChatApp {
@@ -134,6 +141,10 @@ impl AnonChatApp {
             has_key_change_lock: false,
             show_key_change_dialog: false,
             show_accept_warning_modal: false,
+            show_backup_dialog: false,
+            backup_passphrase: String::new(),
+            backup_status_msg: None,
+            last_backup_container: None,
         }
     }
 }
@@ -221,6 +232,9 @@ impl AnonChatApp {
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("➕ Add").clicked() {
                             self.show_add_contact_dialog = true;
+                        }
+                        if ui.button("💾 Backup").clicked() {
+                            self.show_backup_dialog = true;
                         }
                     });
                 });
@@ -627,6 +641,104 @@ impl AnonChatApp {
                         });
                     });
             }
+        }
+
+        // Self-Describing Encrypted Backup Container Dialog
+        if self.show_backup_dialog {
+            egui::Window::new("Self-Describing Encrypted Backup (Argon2id)")
+                .collapsible(false)
+                .resizable(false)
+                .min_width(450.0)
+                .show(ctx, |ui| {
+                    ui.label("Derives a 256-bit AES key from your passphrase using Argon2id.");
+                    ui.label("Cryptographically binds the 42-byte header as AES-256-GCM AAD.");
+                    ui.add_space(8.0);
+
+                    ui.label("Passphrase (min 12 characters, strong diversity):");
+                    ui.add(egui::TextEdit::singleline(&mut self.backup_passphrase).password(true));
+
+                    // Show live validation feedback
+                    let validation = validate_passphrase(&self.backup_passphrase);
+                    match &validation {
+                        Ok(()) => {
+                            ui.label(RichText::new("✓ Passphrase meets strength criteria").color(Color32::from_rgb(0, 210, 180)));
+                        }
+                        Err(e) => {
+                            ui.label(RichText::new(format!("⚠️ {}", e)).color(Color32::from_rgb(255, 183, 77)));
+                        }
+                    }
+
+                    if let Some((ref msg, is_err)) = self.backup_status_msg {
+                        ui.add_space(6.0);
+                        let color = if is_err { Color32::from_rgb(255, 82, 82) } else { Color32::from_rgb(0, 210, 180) };
+                        ui.label(RichText::new(msg).color(color).strong());
+                    }
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let can_export = validation.is_ok();
+                        if ui.add_enabled(can_export, egui::Button::new("🔒 Export Backup Container")).clicked() {
+                            let sample_db = serde_json::json!({
+                                "contacts": self.contacts.len(),
+                                "messages": self.messages.len(),
+                                "timestamp": Utc::now().timestamp(),
+                            }).to_string();
+
+                            match BackupContainer::encrypt_with_passphrase(
+                                &self.backup_passphrase,
+                                sample_db.as_bytes(),
+                                3,
+                                16,
+                                4,
+                            ) {
+                                Ok(container) => {
+                                    let bytes = container.to_bytes();
+                                    let len = bytes.len();
+                                    self.last_backup_container = Some(bytes);
+                                    self.backup_status_msg = Some((
+                                        format!("✓ Backup exported! Total size: {} bytes (42B header + payload)", len),
+                                        false,
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.backup_status_msg = Some((format!("Export failed: {}", e), true));
+                                }
+                            }
+                        }
+
+                        let has_backup = self.last_backup_container.is_some();
+                        if ui.add_enabled(has_backup, egui::Button::new("🔓 Restore & Verify Backup")).clicked() {
+                            if let Some(ref bytes) = self.last_backup_container {
+                                match BackupContainer::from_bytes(bytes) {
+                                    Ok(container) => {
+                                        match container.decrypt_with_passphrase(&self.backup_passphrase) {
+                                            Ok(decrypted) => {
+                                                let str_res = String::from_utf8_lossy(&decrypted);
+                                                self.backup_status_msg = Some((
+                                                    format!("✓ Decryption & AAD verification successful! Payload: {}", str_res),
+                                                    false,
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                self.backup_status_msg = Some((
+                                                    format!("Decryption failed: {} (Wrong passphrase or tampered header)", e),
+                                                    true,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.backup_status_msg = Some((format!("Invalid container: {}", e), true));
+                                    }
+                                }
+                            }
+                        }
+
+                        if ui.button("Close").clicked() {
+                            self.show_backup_dialog = false;
+                        }
+                    });
+                });
         }
     }
 }

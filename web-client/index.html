@@ -256,6 +256,26 @@
       <button id="btn-restore" disabled style="margin-left: 10px; background-color: #37474f; color: #fff;">Restore Session</button>
       <div id="db-status" style="margin-top: 10px; color: var(--text-muted)">Storage: Ready</div>
     </div>
+
+    <!-- Self-Describing Encrypted Backup Container (Argon2id + 42-Byte Header AAD) -->
+    <div class="card">
+      <h2>5. Self-Describing Encrypted Backup Container (Argon2id)</h2>
+      <p style="color: var(--text-muted)">
+        Derives a 256-bit key from user passphrase using Argon2id with a fresh 16-byte random salt.
+        Authenticates the entire 42-byte binary header as AES-256-GCM Additional Authenticated Data (AAD).
+      </p>
+      <label>Backup Passphrase (min 12 characters, strong diversity):</label>
+      <input id="input-backup-passphrase" type="password" placeholder="Enter passphrase (e.g. Correct-Horse-Battery-2026!)" />
+      <div id="passphrase-validation-status" style="font-size: 12px; margin-bottom: 12px; color: #ffb74d;">Passphrase status: Enter at least 12 characters</div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <button id="btn-export-backup" style="background: var(--accent); color: #000;">🔒 Export Encrypted Backup Container</button>
+        <button id="btn-restore-backup" style="background: #37474f; color: #fff;">🔓 Decrypt & Verify Backup Container</button>
+      </div>
+      <div style="margin-top: 16px;">
+        <label>Container Header Inspection (42-Byte Binary Layout):</label>
+        <pre id="backup-output">// Exported backup container info will appear here...</pre>
+      </div>
+    </div>
   </div>
 
   <!-- Key Change Resolution Modal -->

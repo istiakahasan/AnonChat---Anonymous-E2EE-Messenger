@@ -18,10 +18,11 @@ pub mod sealed_sender;
 pub mod x3dh;
 
 pub use backup::{
-    BackupContainer, BackupContainerError, BackupHeader, BACKUP_HEADER_SIZE, BACKUP_MAGIC,
-    BACKUP_NONCE_SIZE, BACKUP_SALT_SIZE, BACKUP_TAG_SIZE, BACKUP_VERSION_1, CIPHER_ID_AES_256_GCM,
+    derive_backup_key, derive_key_from_header, validate_passphrase, BackupContainer,
+    BackupContainerError, BackupHeader, BACKUP_HEADER_SIZE, BACKUP_MAGIC, BACKUP_NONCE_SIZE,
+    BACKUP_SALT_SIZE, BACKUP_TAG_SIZE, BACKUP_VERSION_1, CIPHER_ID_AES_256_GCM,
     DEFAULT_ARGON2_MEMORY_EXPONENT, DEFAULT_ARGON2_PARALLELISM, DEFAULT_ARGON2_TIME_COST,
-    KDF_ID_ARGON2ID,
+    KDF_ID_ARGON2ID, MIN_PASSPHRASE_LEN,
 };
 pub use cipher::{
     decrypt_aes_gcm, encrypt_aes_gcm, pad_message, unpad_message, CipherError,

@@ -1,4 +1,5 @@
 import { SignalWasmService } from './crypto/signalWasmService';
+import { WebBackupContainerService } from './crypto/backupContainer';
 
 const signalService = SignalWasmService.getInstance();
 
@@ -194,5 +195,93 @@ btnRestore.addEventListener('click', async () => {
     }
   } catch (err: any) {
     dbStatus.innerHTML = `<span style="color: #ff5252">Restore error: ${err.message}</span>`;
+  }
+});
+
+// Backup Container UI handlers
+const inputBackupPassphrase = document.getElementById('input-backup-passphrase') as HTMLInputElement;
+const passphraseValidationStatus = document.getElementById('passphrase-validation-status') as HTMLDivElement;
+const btnExportBackup = document.getElementById('btn-export-backup') as HTMLButtonElement;
+const btnRestoreBackup = document.getElementById('btn-restore-backup') as HTMLButtonElement;
+const backupOutput = document.getElementById('backup-output') as HTMLPreElement;
+
+let latestExportedContainer: Uint8Array | null = null;
+
+inputBackupPassphrase.addEventListener('input', () => {
+  const val = inputBackupPassphrase.value;
+  try {
+    WebBackupContainerService.validatePassphrase(val);
+    passphraseValidationStatus.innerHTML = '<span style="color: #00d2b4">✓ Passphrase is strong (meets 12+ chars & diversity policy)</span>';
+  } catch (e: any) {
+    passphraseValidationStatus.innerHTML = `<span style="color: #ffb74d">⚠️ ${e.message}</span>`;
+  }
+});
+
+btnExportBackup.addEventListener('click', async () => {
+  const passphrase = inputBackupPassphrase.value;
+  try {
+    WebBackupContainerService.validatePassphrase(passphrase);
+    backupOutput.textContent = 'Deriving Argon2id key and encrypting container with 42-byte header AAD...';
+
+    const sampleDatabase = JSON.stringify({
+      version: 1,
+      myUuid,
+      contacts: [{ userId: peerUser, nickname: 'Bob', verifiedAt }],
+      keys: 'SQLCipher_Encrypted_Keys_Mock',
+    });
+    const plaintext = new TextEncoder().encode(sampleDatabase);
+
+    latestExportedContainer = await WebBackupContainerService.createContainerWithPassphrase(
+      passphrase,
+      plaintext,
+      3,
+      16,
+      4
+    );
+
+    const header = WebBackupContainerService.parseHeader(latestExportedContainer);
+    backupOutput.textContent = JSON.stringify(
+      {
+        status: 'Exported & Encrypted Successfully',
+        containerTotalBytes: latestExportedContainer.length,
+        header: {
+          magic: 'ANON (0x41 0x4E 0x4F 0x4E)',
+          formatVersion: `0x0${header.version}`,
+          kdf: 'Argon2id (0x01)',
+          timeCostIterations: header.timeCost,
+          memoryExponent: header.memoryExponent,
+          memoryKib: 1 << header.memoryExponent,
+          parallelismLanes: header.parallelism,
+          saltHex: Array.from(header.salt).map((b) => b.toString(16).padStart(2, '0')).join(''),
+          cipher: 'AES-256-GCM (0x01)',
+          nonceHex: Array.from(header.nonce).map((b) => b.toString(16).padStart(2, '0')).join(''),
+          ciphertextLength: header.ciphertextLen,
+        },
+        integrity: '42-byte header verified as AES-GCM AAD',
+      },
+      null,
+      2
+    );
+  } catch (err: any) {
+    backupOutput.textContent = `Backup export failed: ${err.message}`;
+  }
+});
+
+btnRestoreBackup.addEventListener('click', async () => {
+  if (!latestExportedContainer) {
+    backupOutput.textContent = 'Please export a backup container first or load a container file.';
+    return;
+  }
+  const passphrase = inputBackupPassphrase.value;
+  try {
+    backupOutput.textContent = 'Deriving key and decrypting container with header AAD integrity verification...';
+    const decryptedBytes = await WebBackupContainerService.decryptContainerWithPassphrase(
+      passphrase,
+      latestExportedContainer
+    );
+    const decryptedJson = new TextDecoder().decode(decryptedBytes);
+    backupOutput.textContent = `✓ Decryption & Authentication Successful!\n\nPayload:\n${decryptedJson}`;
+  } catch (err: any) {
+    backupOutput.textContent = `Backup restore failed: ${err.message} (Authentication tag failed or wrong passphrase)`;
   }
 });
