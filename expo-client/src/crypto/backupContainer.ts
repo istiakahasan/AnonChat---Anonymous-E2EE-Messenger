@@ -427,16 +427,26 @@ export class BackupContainerService {
  *
  * Inputs:
  * - plaintext: serialized backup bytes
- * - key: CryptoKey (AES-256-GCM)
+ * - key: CryptoKey or raw 32-byte Uint8Array (AES-256-GCM)
  * - nonce: 12 random bytes (fresh for every encryption)
- * - aad: header bytes from offset 0 to 37 (everything before ciphertext length)
+ * - aad: header bytes from offset 0 to 37 (everything before ciphertext length) or full headerBytes
  */
 export async function encryptPayloadAesGcm(
   plaintext: Uint8Array,
-  key: CryptoKey,
+  key: CryptoKey | Uint8Array,
   nonce: Uint8Array,
-  aad: Uint8Array
+  aadOrHeader: Uint8Array
 ): Promise<Uint8Array> {
+  const cryptoKey =
+    key instanceof Uint8Array
+      ? await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['encrypt'])
+      : key;
+
+  const aad =
+    aadOrHeader.length >= BACKUP_AAD_SIZE
+      ? aadOrHeader.slice(0, BACKUP_AAD_SIZE)
+      : aadOrHeader;
+
   const ciphertextBuffer = await crypto.subtle.encrypt(
     {
       name: 'AES-GCM',
@@ -444,7 +454,7 @@ export async function encryptPayloadAesGcm(
       additionalData: aad,
       tagLength: 128,
     },
-    key,
+    cryptoKey,
     plaintext
   );
   return new Uint8Array(ciphertextBuffer);
@@ -455,10 +465,20 @@ export async function encryptPayloadAesGcm(
  */
 export async function decryptPayloadAesGcm(
   ciphertext: Uint8Array,
-  key: CryptoKey,
+  key: CryptoKey | Uint8Array,
   nonce: Uint8Array,
-  aad: Uint8Array
+  aadOrHeader: Uint8Array
 ): Promise<Uint8Array> {
+  const cryptoKey =
+    key instanceof Uint8Array
+      ? await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['decrypt'])
+      : key;
+
+  const aad =
+    aadOrHeader.length >= BACKUP_AAD_SIZE
+      ? aadOrHeader.slice(0, BACKUP_AAD_SIZE)
+      : aadOrHeader;
+
   const decryptedBuffer = await crypto.subtle.decrypt(
     {
       name: 'AES-GCM',
@@ -466,7 +486,7 @@ export async function decryptPayloadAesGcm(
       additionalData: aad,
       tagLength: 128,
     },
-    key,
+    cryptoKey,
     ciphertext
   );
   return new Uint8Array(decryptedBuffer);

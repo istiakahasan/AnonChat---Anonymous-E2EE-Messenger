@@ -3,6 +3,8 @@ import {
   BACKUP_HEADER_SIZE,
   BACKUP_MAGIC,
   MIN_PASSPHRASE_LEN,
+  encryptPayloadAesGcm,
+  decryptPayloadAesGcm,
 } from '../src/crypto/backupContainer';
 
 describe('BackupContainerService (Expo / React Native)', () => {
@@ -71,6 +73,31 @@ describe('BackupContainerService (Expo / React Native)', () => {
       container
     );
     expect(new TextDecoder().decode(decrypted)).toBe('{"contacts":["bob"],"messages":42}');
+  });
+
+  test('encryptPayloadAesGcm and decryptPayloadAesGcm with raw 32-byte key and headerBytes', async () => {
+    const rawKey = new Uint8Array(32);
+    rawKey.fill(0x42);
+    const nonce = new Uint8Array(12);
+    nonce.fill(0x99);
+    const headerBytes = new Uint8Array(42);
+    headerBytes.fill(0xaa);
+    const plaintext = new TextEncoder().encode('Payload encrypted with Sub-Step 3.3 AES-GCM');
+
+    // Encrypt passing raw key and full 42-byte header (AAD automatically sliced to 38 bytes)
+    const ciphertext = await encryptPayloadAesGcm(plaintext, rawKey, nonce, headerBytes);
+    expect(ciphertext.length).toBe(plaintext.length + 16); // 16-byte auth tag appended
+
+    // Decrypt with matching parameters
+    const decrypted = await decryptPayloadAesGcm(ciphertext, rawKey, nonce, headerBytes);
+    expect(new TextDecoder().decode(decrypted)).toBe('Payload encrypted with Sub-Step 3.3 AES-GCM');
+
+    // Tampered header (AAD mismatch) triggers decryption failure
+    const tamperedHeader = new Uint8Array(headerBytes);
+    tamperedHeader[5] ^= 0xff;
+    await expect(
+      decryptPayloadAesGcm(ciphertext, rawKey, nonce, tamperedHeader)
+    ).rejects.toThrow();
   });
 });
 
