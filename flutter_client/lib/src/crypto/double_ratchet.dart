@@ -309,7 +309,8 @@ class DoubleRatchetSession {
     };
   }
 
-  static const int maxSkipGap = 2000;
+  static const int maxSkip = 100;
+  static const int maxSkipGap = maxSkip;
   static const int maxSkippedKeys = 1000;
 
   /// Ratchet Decrypt: Decrypts an inbound message envelope (Sub-Step 4.3).
@@ -320,11 +321,11 @@ class DoubleRatchetSession {
   /// 4. Advances receiving chain: (next_ckr, mk) = KDF_CK(ckr), nr += 1.
   /// 5. Returns unpadded plaintext bytes.
   Uint8List ratchetDecrypt(Map<String, dynamic> envelope) {
-    final header = envelope['header'] as Map<String, dynamic>;
-    final dhStr = (header['dh'] ?? header['dh_pub']) as String;
+    final header = (envelope['header'] ?? envelope) as Map<String, dynamic>;
+    final dhStr = (header['dh'] ?? header['dh_pub'] ?? envelope['header_key']) as String;
     final peerDhBytes = base64.decode(dhStr);
-    final int n = header['n'] as int;
-    final int pn = header['pn'] as int;
+    final int n = (header['n'] ?? envelope['n'] ?? 0) as int;
+    final int pn = (header['pn'] ?? envelope['pn'] ?? 0) as int;
 
     final ciphertextBytes = base64.decode(envelope['ciphertext'] as String);
 
@@ -359,8 +360,8 @@ class DoubleRatchetSession {
   }
 
   void _skipMessageKeys(int until) {
-    if (nr + maxSkipGap < until) {
-      throw StateError('Gap too large: ${until - nr} > $maxSkipGap');
+    if (until > nr + maxSkip) {
+      throw StateError('Gap too large: ${until - nr} > $maxSkip');
     }
     if (receivingChainKey != null) {
       final dhrB64 = dhr != null ? base64.encode(dhr!) : '';

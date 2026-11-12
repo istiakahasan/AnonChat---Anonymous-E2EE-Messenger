@@ -549,11 +549,44 @@ class DoubleRatchetSession:
         self.root_key, self.cks = kdf_rk(self.root_key, dh_out_tx)
 
     def _skip_keys(self, until: int):
+        MAX_SKIP = 100
+        MAX_SKIPPED_KEYS = 1000
+        if until > self.nr + MAX_SKIP:
+            raise ValueError(f"Skip gap too large: {until - self.nr} > {MAX_SKIP} (MAX_SKIP DoS defense)")
         if self.ckr:
             while self.nr < until:
+                if len(self.skipped) >= MAX_SKIPPED_KEYS:
+                    raise ValueError("Too many skipped message keys (resource exhaustion defense)")
                 self.ckr, mk = kdf_ck(self.ckr)
                 self.skipped[(self.dhr_pub, self.nr)] = mk
                 self.nr += 1
+
+def encrypt(session: DoubleRatchetSession, plaintext: bytes, aad: bytes = b"") -> tuple[dict, bytes]:
+    """Library-level helper matching: let (header, ciphertext) = encrypt(&mut alice, b"...", b"")?;"""
+    env = session.ratchet_encrypt(plaintext)
+    ct = base64.b64decode(env["ciphertext"])
+    nonce = base64.b64decode(env["nonce"])
+    # Prepend 12-byte nonce to ciphertext so (header, ciphertext) is self-contained
+    return env["header"], nonce + ct
+
+def decrypt(session: DoubleRatchetSession, header: dict, ciphertext: bytes, aad_or_nonce: bytes = b"") -> bytes:
+    """Library-level helper matching: let plaintext = decrypt(&mut bob, &header, &ciphertext, b"")?;"""
+    if len(aad_or_nonce) == 12:
+        nonce = aad_or_nonce
+        actual_ct = ciphertext
+    elif len(ciphertext) >= 12 + 16:
+        nonce = ciphertext[:12]
+        actual_ct = ciphertext[12:]
+    else:
+        raise ValueError("Invalid ciphertext/nonce length for decryption")
+
+    envelope = {
+        "header": header,
+        "ciphertext": base64.b64encode(actual_ct).decode(),
+        "nonce": base64.b64encode(nonce).decode(),
+    }
+    return session.ratchet_decrypt(envelope)
+    return session.ratchet_decrypt(envelope)
 
 def init_sender_state(shared_secret: bytes, bob_ratchet_public: bytes) -> DoubleRatchetSession:
     """Library-level helper matching: let mut alice = init_sender_state(shared_secret, bob_dh_public)?;"""
@@ -1702,6 +1735,83 @@ def run_all_tests():
     ct_bytes = base64.b64decode(env_m1["ciphertext"])
     assert len(ct_bytes) == 4112, "Ciphertext must be padded to 4096 bytes + 16-byte GCM tag = 4112 bytes"
     print("    [PASS] Step 6: 4096-byte constant padding and AAD header authentication verified.")
+
+    # 16. TASK: SUB-STEP 4.3: DECRYPT A MESSAGE (RECEIVER PATH)
+    print("\n[+] [Sub-Step 4.3] Testing Double Ratchet Decrypt (Receiver Path) & Out-of-Order Delivery...")
+
+    # Set up Alice and Bob sessions
+    dr_secret = secrets.token_bytes(32)
+    bob_priv = secrets.token_bytes(32)
+    bob_pub = x25519_base(bob_priv)
+    bob_kp = (bob_priv, bob_pub)
+    alice_s = init_sender_state(dr_secret, bob_pub)
+    bob_r = init_receiver_state(dr_secret, bob_kp)
+
+    # Test 16.1: In-order sequential decryption using top-level helpers matching:
+    # let (header, ciphertext) = encrypt(&mut alice, b"Hello Bob!", b"")?;
+    # let plaintext = decrypt(&mut bob, &header, &ciphertext, b"")?;
+    h0, ct0 = encrypt(alice_s, b"Message 0: Hello Bob!", b"")
+    h1, ct1 = encrypt(alice_s, b"Message 1: Are you there?", b"")
+    assert h0["n"] == 0 and h1["n"] == 1
+
+    pt0 = decrypt(bob_r, h0, ct0, b"")
+    assert pt0 == b"Message 0: Hello Bob!"
+    assert bob_r.nr == 1
+    assert bob_r.bob_first_message is False
+
+    pt1 = decrypt(bob_r, h1, ct1, b"")
+    assert pt1 == b"Message 1: Are you there?"
+    assert bob_r.nr == 2
+    print("    [PASS] Step 1: Sequential in-order message decryption verified with Nr counter tracking.")
+
+    # Test 16.2: Out-of-order message delivery & skipped message keys
+    # Alice sends Message 2, Message 3, Message 4
+    h2, ct2 = encrypt(alice_s, b"Message 2: Out of order part A", b"")
+    h3, ct3 = encrypt(alice_s, b"Message 3: Out of order part B", b"")
+    h4, ct4 = encrypt(alice_s, b"Message 4: Out of order part C", b"")
+
+    # Packet 4 arrives first (skipping 2 and 3)
+    pt4 = decrypt(bob_r, h4, ct4, b"")
+    assert pt4 == b"Message 4: Out of order part C"
+    assert bob_r.nr == 5
+    # Verify skipped keys stored in bob_r.skipped
+    peer_dh_b = base64.b64decode(h4["dh"])
+    assert (peer_dh_b, 2) in bob_r.skipped
+    assert (peer_dh_b, 3) in bob_r.skipped
+
+    # Delayed Packet 2 arrives now
+    pt2 = decrypt(bob_r, h2, ct2, b"")
+    assert pt2 == b"Message 2: Out of order part A"
+    assert (peer_dh_b, 2) not in bob_r.skipped, "Decrypted skipped key must be removed from cache (single-use FS)"
+
+    # Delayed Packet 3 arrives
+    pt3 = decrypt(bob_r, h3, ct3, b"")
+    assert pt3 == b"Message 3: Out of order part B"
+    assert (peer_dh_b, 3) not in bob_r.skipped
+    print("    [PASS] Step 2: Out-of-order delivery: skipped message keys cached, resolved, and wiped upon consumption.")
+
+    # Test 16.3: Resource exhaustion defense: MAX_SKIP = 100 limit
+    malicious_header_gap = {"dh": h4["dh"], "pn": 0, "n": bob_r.nr + 150}
+    gap_caught = False
+    try:
+        decrypt(bob_r, malicious_header_gap, ct4, b"")
+    except ValueError as e:
+        gap_caught = True
+        assert "Skip gap too large" in str(e)
+        assert "> 100" in str(e)
+    assert gap_caught is True, "Must reject n > Nr + 100 with MAX_SKIP DoS error"
+    print("    [PASS] Step 3: Critical MAX_SKIP Defense: skip gap > 100 rejected before KDF loop.")
+
+    # Test 16.4: AAD tamper detection: modifying n, pn, or dh in header fails authentication tag
+    tampered_header = dict(h1)
+    tampered_header["n"] = 99
+    tamper_failed = False
+    try:
+        decrypt(bob_r, tampered_header, ct1, b"")
+    except Exception:
+        tamper_failed = True
+    assert tamper_failed is True, "Tampering with header fields in AAD must fail tag verification"
+    print("    [PASS] Step 4: AAD authentication: header modification triggers immediate AEAD tag verification failure.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

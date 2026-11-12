@@ -447,3 +447,155 @@ export async function aesGcmEncrypt(
 
   return new Uint8Array(ctBuffer);
 }
+
+export const MAX_SKIP = 100;
+export const MAX_SKIPPED_KEYS = 1000;
+
+/**
+ * Strips 4KB padding with big-endian length prefix validation.
+ */
+export function unpad4KB(padded: Uint8Array): Uint8Array {
+  if (padded.length < 4) {
+    throw new Error('Padded payload too short: minimum 4 bytes required');
+  }
+  const view = new DataView(padded.buffer, padded.byteOffset, padded.byteLength);
+  const originalLen = view.getUint32(0, false);
+  if (4 + originalLen > padded.length) {
+    throw new Error('Padded payload corrupted: invalid length field');
+  }
+  return padded.slice(4, 4 + originalLen);
+}
+
+/**
+ * Saves skipped message keys in MKSKIPPED with MAX_SKIP enforcement.
+ */
+export async function skipMessageKeys(state: RatchetState, until: number): Promise<void> {
+  if (until > state.Nr + MAX_SKIP) {
+    throw new Error(`Skip gap too large: ${until - state.Nr} > ${MAX_SKIP} (MAX_SKIP DoS defense)`);
+  }
+
+  if (state.CKr) {
+    let currentCkr = base64ToUint8Array(state.CKr);
+    const dhrStr = state.DHr || '';
+
+    while (state.Nr < until) {
+      if (Object.keys(state.MKSKIPPED).length >= MAX_SKIPPED_KEYS) {
+        throw new Error(`Skipped keys table reached maximum capacity (${MAX_SKIPPED_KEYS})`);
+      }
+
+      const { nextCk, mk } = await kdfCk(currentCkr);
+      currentCkr = nextCk;
+      state.MKSKIPPED[`${dhrStr}:${state.Nr}`] = uint8ArrayToBase64(mk);
+      state.Nr += 1;
+    }
+
+    state.CKr = uint8ArrayToBase64(currentCkr);
+  }
+}
+
+/**
+ * Sub-Step 4.3: Decrypt a Message (Receiver Path) with out-of-order handling.
+ *
+ * Algorithm:
+ * 1. Check skipped keys first: key = header.dh + ":" + header.n
+ *    If in MKSKIPPED: retrieve MK, delete from map, decrypt, zeroize MK, return without advancing state.
+ * 2. Check for DH ratchet step: If header.dh != state.DHr:
+ *    a. Save skipped keys from current receiving chain up to header.pn.
+ *    b. Perform DH ratchet step (Sub-Step 4.4).
+ * 3. Skip messages in the new chain up to header.n (enforcing MAX_SKIP).
+ * 4. Derive message key: (CKr_new, MK) = KDF_CK(CKr), state.CKr = CKr_new, state.Nr++.
+ * 5. Decrypt ciphertext with AES-256-GCM using MK and serialize(header) as AAD.
+ * 6. Zeroize MK.
+ */
+export async function ratchetDecrypt(
+  state: RatchetState,
+  header: RatchetMessageHeader,
+  nonce: Uint8Array | string,
+  ciphertext: Uint8Array | string,
+  performDhRatchet?: (state: RatchetState, peerDhPub: string) => Promise<void>
+): Promise<Uint8Array> {
+  const nonceBytes = typeof nonce === 'string' ? base64ToUint8Array(nonce) : nonce;
+  const ctBytes = typeof ciphertext === 'string' ? base64ToUint8Array(ciphertext) : ciphertext;
+
+  const headerKey = `${header.dh}:${header.n}`;
+  const headerBytes = new TextEncoder().encode(
+    JSON.stringify({
+      dh: header.dh,
+      n: header.n,
+      pn: header.pn,
+    })
+  );
+
+  // 1. Check skipped keys first
+  if (state.MKSKIPPED[headerKey]) {
+    const mk = base64ToUint8Array(state.MKSKIPPED[headerKey]);
+    delete state.MKSKIPPED[headerKey]; // One-time use
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      mk,
+      { name: 'AES-GCM' },
+      false,
+      ['decrypt']
+    );
+
+    const ptBuffer = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonceBytes, additionalData: headerBytes, tagLength: 128 },
+      cryptoKey,
+      ctBytes
+    );
+
+    // 6. Zeroize MK
+    mk.fill(0);
+
+    return unpad4KB(new Uint8Array(ptBuffer));
+  }
+
+  // 2. Check for DH ratchet step
+  if (!state.DHr || state.DHr !== header.dh) {
+    // 2a. Save skipped keys from current receiving chain up to header.pn
+    await skipMessageKeys(state, header.pn);
+
+    // 2b. Perform DH ratchet step
+    if (performDhRatchet) {
+      await performDhRatchet(state, header.dh);
+    } else {
+      state.DHr = header.dh;
+      state.PNs = state.Ns;
+      state.Ns = 0;
+      state.Nr = 0;
+    }
+  }
+
+  // 3. Skip messages in the new chain up to header.n
+  await skipMessageKeys(state, header.n);
+
+  // 4. Derive message key
+  if (!state.CKr) {
+    throw new Error('Missing receiving chain key');
+  }
+  const ckrBytes = base64ToUint8Array(state.CKr);
+  const { nextCk, mk } = await kdfCk(ckrBytes);
+  state.CKr = uint8ArrayToBase64(nextCk);
+  state.Nr += 1;
+
+  // 5. Decrypt
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    mk,
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt']
+  );
+
+  const ptBuffer = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: nonceBytes, additionalData: headerBytes, tagLength: 128 },
+    cryptoKey,
+    ctBytes
+  );
+
+  // 6. Zeroize MK
+  mk.fill(0);
+
+  return unpad4KB(new Uint8Array(ptBuffer));
+}

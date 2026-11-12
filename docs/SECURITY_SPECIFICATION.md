@@ -296,6 +296,42 @@ Upon receiving and authenticating Alice's first message envelope:
    - Header JSON is serialized and bound as AES-256-GCM **Additional Authenticated Data (AAD)**.
    - Ciphertext output includes 16-byte GCM authentication tag appended at the end.
 
+### 5.10 Sub-Step 4.3: Decrypt a Message (Receiver Path)
+
+#### Per-Message Decryption Algorithm:
+Inputs: `(header, nonce, ciphertext)`
+1. **Check Skipped Keys First**:
+   - Compute map lookup key: `key = header.dh + ":" + header.n`.
+   - If `MKSKIPPED[key]` exists:
+     - Retrieve single-use message key `MK`.
+     - Delete entry from `MKSKIPPED` immediately (enforces forward secrecy against replay).
+     - Decrypt ciphertext with `MK` using AES-256-GCM and header as AAD.
+     - Zeroize `MK` and return plaintext (without advancing any ratchet state).
+2. **Check for DH Ratchet Step**:
+   - If `header.dh != state.DHr`:
+     - Save skipped keys from current receiving chain up to $PN$: while $N_r < \text{header.pn}$, derive $(CK_{r\text{,new}}, MK_{\text{skipped}}) = \text{KDF\_CK}(CK_r)$, store in `MKSKIPPED[state.DHr + ":" + state.Nr]`, advance $CK_r$ and $N_r$.
+     - Enforce `MAX_SKIP = 100` ceiling on skip gap ($until - N_r \le 100$) and cache capacity limit (`MAX_SKIPPED_KEYS = 1000`).
+     - Perform Diffie-Hellman ratchet step (Sub-Step 4.4).
+3. **Skip Messages in New Chain**:
+   - While $N_r < \text{header.n}$:
+     - Derive $(CK_{r\text{,new}}, MK_{\text{skipped}}) = \text{KDF\_CK}(CK_r)$.
+     - Store `MKSKIPPED[header.dh + ":" + state.Nr] = MK_skipped`.
+     - Advance $CK_r \leftarrow CK_{r\text{,new}}$ and $N_r \leftarrow N_r + 1$.
+     - Enforce `MAX_SKIP = 100`.
+4. **Derive Message Key**:
+   - Derive $(CK_{r\text{,new}}, MK) = \text{KDF\_CK}(CK_r)$ via HMAC-SHA256 (`0x01` for $MK$, `0x02` for $CK_{r\text{,new}}$).
+   - Advance receiving chain: $CK_r \leftarrow CK_{r\text{,new}}$ and $N_r \leftarrow N_r + 1$.
+5. **Authenticated Decryption**:
+   - Decrypt ciphertext with AES-256-GCM using `MK`, nonce, and serialized header as AAD.
+   - If authentication tag check fails, throw an error immediately (prevents ciphertext forgery or tampering).
+   - Strip 4096-byte constant block padding.
+6. **Zeroize `MK`**:
+   - Overwrite `MK` with zeros immediately after decryption.
+
+#### Critical Defense: `MAX_SKIP = 100` DoS Mitigation:
+An adversary could send an envelope with $N = 1,000,000$ to trigger a million costly KDF computations and allocate memory for a million message keys. AnonChat enforces `MAX_SKIP = 100` at the gate: if the gap between $N_r$ and the requested message number exceeds 100, the packet is rejected with a `GapTooLarge` error before entering the derivation loop.
+
+
 
 
 

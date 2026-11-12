@@ -9,6 +9,8 @@ import {
   uint8ArrayToBase64,
   base64ToUint8Array,
   ratchetEncrypt,
+  ratchetDecrypt,
+  MAX_SKIP,
 } from '../src/crypto/doubleRatchet';
 
 describe('RatchetState & DoubleRatchet State Machine', () => {
@@ -100,6 +102,73 @@ describe('RatchetState & DoubleRatchet State Machine', () => {
     expect(env2.header.n).toBe(1);
     expect(env2.header.pn).toBe(0);
     expect(env2.nonce).not.toBe(env1.nonce); // Fresh random nonce
+  });
+
+  test('Sub-Step 4.3: Decrypt a message (Receiver Path) & Out-of-Order handling', async () => {
+    // Setup matching receiver state
+    const sharedSecret = new Uint8Array(32).fill(0x33);
+    const sharedCks = new Uint8Array(32).fill(0x77);
+
+    const senderState: RatchetState = {
+      DHs_pub: uint8ArrayToBase64(new Uint8Array(32).fill(0x10)),
+      DHs_priv: uint8ArrayToBase64(new Uint8Array(32).fill(0x11)),
+      DHr: uint8ArrayToBase64(new Uint8Array(32).fill(0x20)),
+      RK: uint8ArrayToBase64(sharedSecret),
+      CKs: uint8ArrayToBase64(sharedCks),
+      CKr: null,
+      Ns: 0,
+      Nr: 0,
+      PNs: 0,
+      MKSKIPPED: {},
+    };
+
+    const receiverState: RatchetState = {
+      DHs_pub: uint8ArrayToBase64(new Uint8Array(32).fill(0x20)),
+      DHs_priv: uint8ArrayToBase64(new Uint8Array(32).fill(0x21)),
+      DHr: uint8ArrayToBase64(new Uint8Array(32).fill(0x10)),
+      RK: uint8ArrayToBase64(sharedSecret),
+      CKs: null,
+      CKr: uint8ArrayToBase64(sharedCks), // Synchronized receiving chain
+      Ns: 0,
+      Nr: 0,
+      PNs: 0,
+      MKSKIPPED: {},
+    };
+
+    // 1. In-order decryption
+    const env0 = await ratchetEncrypt(senderState, 'Message zero');
+    const pt0 = await ratchetDecrypt(receiverState, env0.header, env0.nonce, env0.ciphertext);
+    expect(new TextDecoder().decode(pt0)).toBe('Message zero');
+    expect(receiverState.Nr).toBe(1);
+
+    // 2. Out-of-order delivery: Send messages 1, 2, 3; Receive 3 first
+    const env1 = await ratchetEncrypt(senderState, 'Message one');
+    const env2 = await ratchetEncrypt(senderState, 'Message two');
+    const env3 = await ratchetEncrypt(senderState, 'Message three');
+
+    // Deliver message 3 first (skipping 1 and 2)
+    const pt3 = await ratchetDecrypt(receiverState, env3.header, env3.nonce, env3.ciphertext);
+    expect(new TextDecoder().decode(pt3)).toBe('Message three');
+    expect(receiverState.Nr).toBe(4);
+    expect(receiverState.MKSKIPPED[`${env3.header.dh}:1`]).toBeDefined();
+    expect(receiverState.MKSKIPPED[`${env3.header.dh}:2`]).toBeDefined();
+
+    // Deliver delayed message 1
+    const pt1 = await ratchetDecrypt(receiverState, env1.header, env1.nonce, env1.ciphertext);
+    expect(new TextDecoder().decode(pt1)).toBe('Message one');
+    // Once used, removed from MKSKIPPED
+    expect(receiverState.MKSKIPPED[`${env1.header.dh}:1`]).toBeUndefined();
+
+    // Deliver delayed message 2
+    const pt2 = await ratchetDecrypt(receiverState, env2.header, env2.nonce, env2.ciphertext);
+    expect(new TextDecoder().decode(pt2)).toBe('Message two');
+    expect(receiverState.MKSKIPPED[`${env2.header.dh}:2`]).toBeUndefined();
+
+    // 3. MAX_SKIP = 100 DoS defense: gap > 100 rejected
+    const maliciousHeader = { dh: env3.header.dh, pn: 0, n: receiverState.Nr + MAX_SKIP + 1 };
+    await expect(
+      ratchetDecrypt(receiverState, maliciousHeader, env3.nonce, env3.ciphertext)
+    ).rejects.toThrow(/MAX_SKIP DoS defense/);
   });
 });
 

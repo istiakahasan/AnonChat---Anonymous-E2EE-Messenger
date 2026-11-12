@@ -100,6 +100,48 @@ void main() {
       expect(bobHeader['n'], equals(0));
       expect(bobHeader['dh'], isNotNull);
     });
+
+    test('Sub-Step 4.3: Decrypt a message (Receiver Path) & Out-of-Order handling', () {
+      final ratchet = DoubleRatchet();
+      final sharedSecret = Uint8List(32)..fillRange(0, 32, 0x99);
+      final bobRatchetKeyPair = RatchetKeyPair.generate();
+
+      final aliceSession = ratchet.initSenderSession(sharedSecret, bobRatchetKeyPair.publicKey);
+      final bobSession = ratchet.initReceiverSession(sharedSecret, bobRatchetKeyPair);
+
+      // In-order decryption
+      final pkt0 = ratchet.encrypt(aliceSession, 'Packet 0');
+      final pt0 = ratchet.decrypt(bobSession, pkt0);
+      expect(String.fromCharCodes(pt0), equals('Packet 0'));
+      expect(bobSession.nr, equals(1));
+
+      // Out-of-order delivery: Alice sends 1, 2, 3; Bob receives 3 first
+      final pkt1 = ratchet.encrypt(aliceSession, 'Packet 1');
+      final pkt2 = ratchet.encrypt(aliceSession, 'Packet 2');
+      final pkt3 = ratchet.encrypt(aliceSession, 'Packet 3');
+
+      // Packet 3 arrives first
+      final pt3 = ratchet.decrypt(bobSession, pkt3);
+      expect(String.fromCharCodes(pt3), equals('Packet 3'));
+      expect(bobSession.nr, equals(4));
+      expect(bobSession.mkSkipped.isNotEmpty, isTrue);
+
+      // Packet 1 arrives later (from skipped keys)
+      final pt1 = ratchet.decrypt(bobSession, pkt1);
+      expect(String.fromCharCodes(pt1), equals('Packet 1'));
+
+      // Packet 2 arrives later (from skipped keys)
+      final pt2 = ratchet.decrypt(bobSession, pkt2);
+      expect(String.fromCharCodes(pt2), equals('Packet 2'));
+
+      // MAX_SKIP = 100 defense: attacker sending n = 500 is rejected
+      final maliciousPkt = {
+        'header': {'dh': pkt3['header']['dh'], 'pn': 0, 'n': 500},
+        'ciphertext': pkt3['ciphertext'],
+        'nonce': pkt3['nonce'],
+      };
+      expect(() => ratchet.decrypt(bobSession, maliciousPkt), throwsA(isA<StateError>()));
+    });
   });
 }
 

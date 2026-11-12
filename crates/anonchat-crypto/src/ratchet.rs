@@ -31,7 +31,8 @@ use crate::identity::SecretBytes32;
 use crate::x3dh::SharedSecret;
 
 pub const MAX_SKIPPED_KEYS: usize = 1000;
-pub const MAX_SKIP_GAP: u32 = 2000;
+pub const MAX_SKIP: u32 = 100;
+pub const MAX_SKIP_GAP: u32 = MAX_SKIP;
 
 #[derive(Error, Debug)]
 pub enum RatchetError {
@@ -45,7 +46,7 @@ pub enum RatchetError {
     MissingSendingChain,
     #[error("Missing receiving chain key")]
     MissingReceivingChain,
-    #[error("Message gap too large ({0} > {MAX_SKIP_GAP})")]
+    #[error("Message gap too large ({0} > {MAX_SKIP})")]
     GapTooLarge(u32),
     #[error("Skipped keys table reached maximum capacity ({MAX_SKIPPED_KEYS})")]
     TooManySkippedKeys,
@@ -419,9 +420,11 @@ impl RatchetSession {
         // 1. Try skipped keys first
         let skipped_key = (peer_dh_bytes, envelope.header.n);
         if let Some(mk_secret) = self.skipped_message_keys.remove(&skipped_key) {
-            let mk = mk_secret.expose_secret().0;
-            return decrypt_aes_gcm(&mk, &nonce_bytes, &ciphertext, &aad)
+            let mut mk = mk_secret.expose_secret().0;
+            let res = decrypt_aes_gcm(&mk, &nonce_bytes, &ciphertext, &aad)
                 .map_err(RatchetError::Cipher);
+            mk.zeroize();
+            return res;
         }
 
         // 2. If new DH key received from peer, advance DH Ratchet
@@ -452,7 +455,11 @@ impl RatchetSession {
         self.bob_first_message = false;
 
         // 5. Decrypt and verify AAD
-        decrypt_aes_gcm(&mk, &nonce_bytes, &ciphertext, &aad).map_err(RatchetError::Cipher)
+        let mut mk = mk;
+        let res = decrypt_aes_gcm(&mk, &nonce_bytes, &ciphertext, &aad).map_err(RatchetError::Cipher);
+        // 6. Zeroize MK
+        mk.zeroize();
+        res
     }
 
     /// Advances the DH ratchet upon receiving a new DH public key from the peer.
@@ -491,7 +498,7 @@ impl RatchetSession {
 
     /// Skips message keys in the receiving chain and stores them in `skipped_message_keys`.
     fn skip_message_keys(&mut self, until: u32) -> Result<(), RatchetError> {
-        if self.nr + MAX_SKIP_GAP < until {
+        if until > self.nr + MAX_SKIP {
             return Err(RatchetError::GapTooLarge(until - self.nr));
         }
 
@@ -675,7 +682,7 @@ pub fn init_receiver_state<K: IntoReceiverKeypair>(
 /// `let (header, ciphertext) = encrypt(&mut alice, b"Hello Bob!", b"")?;`
 ///
 /// Encrypts an outbound plaintext message under the Double Ratchet session.
-/// Returns the message header struct and the ciphertext (including the 16-byte GCM authentication tag).
+/// Returns the message header struct and the combined nonce + ciphertext (including the 16-byte GCM authentication tag).
 pub fn encrypt(
     session: &mut RatchetSession,
     plaintext: &[u8],
@@ -683,7 +690,38 @@ pub fn encrypt(
 ) -> Result<(MessageHeader, Vec<u8>), RatchetError> {
     let envelope = session.ratchet_encrypt(plaintext)?;
     let ct_bytes = BASE64.decode(&envelope.ciphertext)?;
-    Ok((envelope.header, ct_bytes))
+    let nonce_bytes = BASE64.decode(&envelope.nonce)?;
+    let mut combined = Vec::with_capacity(nonce_bytes.len() + ct_bytes.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&ct_bytes);
+    Ok((envelope.header, combined))
 }
+
+/// Top-level helper function matching libsignal-style API:
+/// `let plaintext = decrypt(&mut bob, &header, &ciphertext, b"")?;`
+///
+/// Decrypts an inbound message under the Double Ratchet session.
+pub fn decrypt(
+    session: &mut RatchetSession,
+    header: &MessageHeader,
+    ciphertext: &[u8],
+    aad_or_nonce: &[u8],
+) -> Result<Vec<u8>, RatchetError> {
+    let (nonce, actual_ct) = if aad_or_nonce.len() == 12 {
+        (aad_or_nonce.to_vec(), ciphertext.to_vec())
+    } else if ciphertext.len() >= 12 + 16 {
+        (ciphertext[0..12].to_vec(), ciphertext[12..].to_vec())
+    } else {
+        return Err(RatchetError::Cipher(CipherError::InvalidNonceLength(0)));
+    };
+
+    let envelope = EncryptedEnvelope {
+        header: header.clone(),
+        ciphertext: BASE64.encode(&actual_ct),
+        nonce: BASE64.encode(&nonce),
+    };
+    session.ratchet_decrypt(&envelope)
+}
+
 
 
