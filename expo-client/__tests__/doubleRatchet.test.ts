@@ -11,6 +11,14 @@ import {
   ratchetEncrypt,
   ratchetDecrypt,
   MAX_SKIP,
+  WirePacket,
+  serializeWirePacket,
+  deserializeWirePacket,
+  validateWirePacket,
+  serializeRatchetState,
+  deserializeRatchetState,
+  exportSessionState,
+  importSessionState,
 } from '../src/crypto/doubleRatchet';
 
 describe('RatchetState & DoubleRatchet State Machine', () => {
@@ -169,6 +177,70 @@ describe('RatchetState & DoubleRatchet State Machine', () => {
     await expect(
       ratchetDecrypt(receiverState, maliciousHeader, env3.nonce, env3.ciphertext)
     ).rejects.toThrow(/MAX_SKIP DoS defense/);
+  });
+
+  test('Sub-Step 4.5: Wire Format and State Persistence', async () => {
+    const sharedCks = new Uint8Array(32).fill(0x33);
+    const senderState: RatchetState = {
+      DHs_pub: uint8ArrayToBase64(mockBobKeyPair.publicKey),
+      DHs_priv: uint8ArrayToBase64(mockBobKeyPair.privateKey),
+      DHr: uint8ArrayToBase64(mockBobKeyPair.publicKey),
+      RK: uint8ArrayToBase64(mockSharedSecret),
+      CKs: uint8ArrayToBase64(sharedCks),
+      CKr: null,
+      Ns: 0,
+      Nr: 0,
+      PNs: 0,
+      MKSKIPPED: {},
+    };
+
+    const receiverState: RatchetState = {
+      DHs_pub: uint8ArrayToBase64(mockBobKeyPair.publicKey),
+      DHs_priv: uint8ArrayToBase64(mockBobKeyPair.privateKey),
+      DHr: uint8ArrayToBase64(mockBobKeyPair.publicKey),
+      RK: uint8ArrayToBase64(mockSharedSecret),
+      CKs: null,
+      CKr: uint8ArrayToBase64(sharedCks),
+      Ns: 0,
+      Nr: 0,
+      PNs: 0,
+      MKSKIPPED: {},
+    };
+
+    // 1. Encrypt message producing valid WirePacket
+    const env = await ratchetEncrypt(senderState, 'Wire format message');
+    expect(env.v).toBe(1);
+    expect(env.header.dh).toBeDefined();
+    expect(env.header.n).toBe(0);
+    expect(env.header.pn).toBe(0);
+
+    const wireJson = serializeWirePacket(env);
+    const parsedPacket = deserializeWirePacket(wireJson);
+    expect(parsedPacket.v).toBe(1);
+    expect(parsedPacket.header.dh).toBe(env.header.dh);
+
+    // Unsupported version validation
+    const invalidPacket: WirePacket = { ...parsedPacket, v: 2 };
+    expect(() => validateWirePacket(invalidPacket)).toThrow(/Unsupported wire packet version: 2/);
+
+    // 2. State Persistence
+    const senderSerialized = serializeRatchetState(senderState);
+    const receiverSerialized = serializeRatchetState(receiverState);
+
+    const restoredSender = deserializeRatchetState(senderSerialized);
+    const restoredReceiver = deserializeRatchetState(receiverSerialized);
+
+    expect(restoredSender.Ns).toBe(senderState.Ns);
+    expect(restoredReceiver.Nr).toBe(receiverState.Nr);
+
+    // Decrypt using restored receiver state
+    const pt = await ratchetDecrypt(
+      restoredReceiver,
+      parsedPacket.header,
+      parsedPacket.nonce,
+      parsedPacket.ciphertext
+    );
+    expect(new TextDecoder().decode(pt)).toBe('Wire format message');
   });
 });
 

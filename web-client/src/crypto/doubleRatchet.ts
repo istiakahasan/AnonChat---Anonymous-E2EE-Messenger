@@ -243,11 +243,111 @@ export interface RatchetMessageHeader {
   n: number;
 }
 
-export interface RatchetEnvelope {
+/**
+ * Wire packet transmitted over the relay server (Sub-Step 4.5).
+ *
+ * Layout:
+ * ```json
+ * {
+ *   "v": 1,
+ *   "header": {
+ *     "dh": "base64_x25519_public_key",
+ *     "pn": 0,
+ *     "n": 42
+ *   },
+ *   "nonce": "base64_12_bytes",
+ *   "ciphertext": "base64_aes_gcm_output_with_tag"
+ * }
+ * ```
+ */
+export interface WirePacket {
+  v: number;
+  header: RatchetMessageHeader;
+  nonce: string;
+  ciphertext: string;
+}
+
+export interface RatchetEnvelope extends WirePacket {
+  v: number;
   header: RatchetMessageHeader;
   ciphertext: string;
   nonce: string;
   mk?: string;
+}
+
+/**
+ * Validates wire packet fields according to Sub-Step 4.5 specification.
+ */
+export function validateWirePacket(packet: WirePacket): void {
+  if (packet.v !== 1) {
+    throw new Error(`Unsupported wire packet version: ${packet.v}`);
+  }
+  if (!packet.header || typeof packet.header.dh !== 'string') {
+    throw new Error('Invalid wire packet: missing header.dh');
+  }
+  const dhBytes = base64ToUint8Array(packet.header.dh);
+  if (dhBytes.length !== 32) {
+    throw new Error(`Invalid ratchet public key length: ${dhBytes.length}`);
+  }
+  const nonceBytes = base64ToUint8Array(packet.nonce);
+  if (nonceBytes.length !== 12) {
+    throw new Error(`Invalid nonce length: expected 12 bytes, got ${nonceBytes.length}`);
+  }
+  const ctBytes = base64ToUint8Array(packet.ciphertext);
+  if (ctBytes.length < 16) {
+    throw new Error(`Invalid ciphertext: length ${ctBytes.length} < 16 (missing tag)`);
+  }
+}
+
+/**
+ * Serializes a WirePacket to a JSON string with format validation.
+ */
+export function serializeWirePacket(packet: WirePacket): string {
+  validateWirePacket(packet);
+  return JSON.stringify(packet);
+}
+
+/**
+ * Deserializes a WirePacket from a JSON string with format validation.
+ */
+export function deserializeWirePacket(jsonStr: string): WirePacket {
+  const parsed = JSON.parse(jsonStr) as WirePacket;
+  validateWirePacket(parsed);
+  return parsed;
+}
+
+/**
+ * Serializes RatchetState to a JSON string for persistent encrypted storage (Sub-Step 4.5).
+ */
+export function serializeRatchetState(state: RatchetState): string {
+  return JSON.stringify(state);
+}
+
+/**
+ * Deserializes RatchetState from a JSON string.
+ */
+export function deserializeRatchetState(jsonStr: string): RatchetState {
+  const parsed = JSON.parse(jsonStr) as RatchetState;
+  if (!parsed.RK || !parsed.DHs_priv || !parsed.DHs_pub) {
+    throw new Error('Invalid RatchetState: missing required key material');
+  }
+  return parsed;
+}
+
+/**
+ * Exports DoubleRatchetSessionState to a JSON string.
+ */
+export function exportSessionState(session: DoubleRatchetSessionState): string {
+  const state = toRatchetState(session);
+  return serializeRatchetState(state);
+}
+
+/**
+ * Imports DoubleRatchetSessionState from a JSON string.
+ */
+export function importSessionState(jsonStr: string): DoubleRatchetSessionState {
+  const state = deserializeRatchetState(jsonStr);
+  return fromRatchetState(state);
 }
 
 export async function kdfCk(ck: Uint8Array): Promise<{ nextCk: Uint8Array; mk: Uint8Array }> {
@@ -355,6 +455,7 @@ export async function ratchetEncrypt(
   state.Ns += 1;
 
   return {
+    v: 1,
     header,
     nonce: uint8ArrayToBase64(nonce),
     ciphertext: uint8ArrayToBase64(ciphertext),

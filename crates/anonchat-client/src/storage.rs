@@ -379,6 +379,31 @@ impl ClientDatabase {
         Ok(())
     }
 
+    /// Saves a RatchetSession directly into the encrypted database.
+    pub fn save_ratchet_state(
+        &self,
+        peer_user_id: &str,
+        session: &anonchat_crypto::RatchetSession,
+    ) -> Result<(), LocalDbError> {
+        let serialized = session.to_serialized();
+        let json = serde_json::to_string(&serialized)?;
+        self.save_ratchet_session(peer_user_id, &json)
+    }
+
+    /// Loads and reconstructs a RatchetSession from the encrypted database.
+    pub fn load_ratchet_state(
+        &self,
+        peer_user_id: &str,
+    ) -> Result<Option<anonchat_crypto::RatchetSession>, LocalDbError> {
+        if let Some(stored) = self.get_ratchet_session(peer_user_id)? {
+            let serialized: anonchat_crypto::SerializedRatchetSession =
+                serde_json::from_str(&stored.session_json)?;
+            Ok(Some(anonchat_crypto::RatchetSession::from_serialized(&serialized)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Fetches an individual stored ratchet session for a peer.
     pub fn get_ratchet_session(&self, peer_user_id: &str) -> Result<Option<StoredRatchetSession>, LocalDbError> {
         let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;

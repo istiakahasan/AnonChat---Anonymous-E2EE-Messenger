@@ -24,6 +24,7 @@ import hmac
 import time
 import secrets
 import struct
+from dataclasses import dataclass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import urllib.request
@@ -389,7 +390,7 @@ def x3dh_bob_respond(bob: ClientIdentity, initiation: dict):
     return hkdf_sha256(dh1 + dh2 + dh3 + dh4, bytes(32), b"AnonChat_X3DH_v1_Protocol", 32)
 
 # ---------------------------------------------------------------------------
-# Task 3: Double Ratchet State Machine
+# Task 3: Double Ratchet State Machine & Wire Format (Sub-Step 4.5)
 # ---------------------------------------------------------------------------
 def kdf_rk(rk: bytes, dh_out: bytes):
     prk = hkdf_extract(rk, dh_out)
@@ -400,6 +401,57 @@ def kdf_ck(ck: bytes):
     mk = hmac.new(ck, b"\x01", hashlib.sha256).digest()
     next_ck = hmac.new(ck, b"\x02", hashlib.sha256).digest()
     return next_ck, mk
+
+@dataclass
+class WirePacket:
+    v: int
+    header: dict
+    nonce: str
+    ciphertext: str
+
+    def to_dict(self) -> dict:
+        return {
+            "v": self.v,
+            "header": self.header,
+            "nonce": self.nonce,
+            "ciphertext": self.ciphertext,
+        }
+
+    def to_json(self) -> str:
+        self.validate()
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        pkt = cls(
+            v=d.get("v", 1),
+            header=d["header"],
+            nonce=d["nonce"],
+            ciphertext=d["ciphertext"],
+        )
+        pkt.validate()
+        return pkt
+
+    @classmethod
+    def from_json(cls, json_str: str):
+        d = json.loads(json_str)
+        return cls.from_dict(d)
+
+    def validate(self):
+        if self.v != 1:
+            raise ValueError(f"Unsupported wire packet version: {self.v}")
+        if not self.header or ("dh" not in self.header and "dh_pub" not in self.header):
+            raise ValueError("Invalid wire packet: missing header.dh")
+        dh_str = self.header.get("dh") or self.header.get("dh_pub")
+        dh_bytes = base64.b64decode(dh_str)
+        if len(dh_bytes) != 32:
+            raise ValueError(f"Invalid DH public key length: {len(dh_bytes)}")
+        nonce_bytes = base64.b64decode(self.nonce)
+        if len(nonce_bytes) != 12:
+            raise ValueError(f"Invalid nonce length: expected 12 bytes, got {len(nonce_bytes)}")
+        ct_bytes = base64.b64decode(self.ciphertext)
+        if len(ct_bytes) < 16:
+            raise ValueError(f"Invalid ciphertext: length {len(ct_bytes)} < 16 (missing tag)")
 
 class DoubleRatchetSession:
     def __init__(self, dhs_priv, dhs_pub, dhr_pub, root_key, cks=None, ckr=None, bob_first_message=False):
@@ -413,6 +465,61 @@ class DoubleRatchetSession:
         self.nr = 0
         self.pn = 0
         self.skipped = {}
+        self.bob_first_message = bob_first_message
+
+    def to_dict(self) -> dict:
+        skipped_dict = {}
+        for (dh_bytes, n), mk in self.skipped.items():
+            dh_b64 = base64.b64encode(dh_bytes).decode() if isinstance(dh_bytes, bytes) else str(dh_bytes)
+            skipped_dict[f"{dh_b64}:{n}"] = base64.b64encode(mk).decode()
+        return {
+            "DHs_priv": base64.b64encode(self.dhs_priv).decode(),
+            "DHs_pub": base64.b64encode(self.dhs_pub).decode(),
+            "DHr": base64.b64encode(self.dhr_pub).decode() if self.dhr_pub else None,
+            "RK": base64.b64encode(self.root_key).decode(),
+            "CKs": base64.b64encode(self.cks).decode() if self.cks else None,
+            "CKr": base64.b64encode(self.ckr).decode() if self.ckr else None,
+            "Ns": self.ns,
+            "Nr": self.nr,
+            "PNs": self.pn,
+            "MKSKIPPED": skipped_dict,
+            "bob_first_message": self.bob_first_message,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        dhs_priv = base64.b64decode(d["DHs_priv"])
+        dhs_pub = base64.b64decode(d["DHs_pub"])
+        dhr_pub = base64.b64decode(d["DHr"]) if d.get("DHr") else None
+        root_key = base64.b64decode(d["RK"])
+        cks = base64.b64decode(d["CKs"]) if d.get("CKs") else None
+        ckr = base64.b64decode(d["CKr"]) if d.get("CKr") else None
+        session = cls(
+            dhs_priv=dhs_priv,
+            dhs_pub=dhs_pub,
+            dhr_pub=dhr_pub,
+            root_key=root_key,
+            cks=cks,
+            ckr=ckr,
+            bob_first_message=d.get("bob_first_message", False),
+        )
+        session.ns = d.get("Ns", 0)
+        session.nr = d.get("Nr", 0)
+        session.pn = d.get("PNs", 0)
+        if "MKSKIPPED" in d:
+            for k, v in d["MKSKIPPED"].items():
+                parts = k.split(":")
+                dh_bytes = base64.b64decode(parts[0])
+                n = int(parts[1])
+                session.skipped[(dh_bytes, n)] = base64.b64decode(v)
+        return session
+
+    @classmethod
+    def from_json(cls, json_str: str):
+        return cls.from_dict(json.loads(json_str))
         self.bob_first_message = bob_first_message
 
     @classmethod
@@ -503,10 +610,15 @@ class DoubleRatchetSession:
         aad = json.dumps(aad_header, sort_keys=True).encode()
         ciphertext = encrypt_authenticated(mk, nonce, plaintext, aad)
         return {
+            "v": 1,
             "header": header,
             "ciphertext": base64.b64encode(ciphertext).decode(),
             "nonce": base64.b64encode(nonce).decode()
         }
+
+    def encrypt_wire(self, plaintext: bytes) -> WirePacket:
+        env = self.ratchet_encrypt(plaintext)
+        return WirePacket.from_dict(env)
 
     def ratchet_decrypt(self, envelope: dict) -> bytes:
         header = envelope["header"]
@@ -1903,6 +2015,98 @@ def run_all_tests():
     healed_pt = decrypt(bob_p, h_healed, ct_healed, b"")
     assert healed_pt == b"Post-compromise secured message"
     print("    [PASS] Step 4: Post-Compromise Security (Break-in Recovery): DH ratchet restored forward secrecy after compromise.")
+
+    # 18. TASK: SUB-STEP 4.5: WIRE FORMAT AND STATE PERSISTENCE
+    print("\n[+] [Sub-Step 4.5] Testing Double Ratchet Wire Format & State Persistence...")
+
+    # Test 18.1: Wire Packet JSON schema: {"v": 1, "header": {"dh": "...", "pn": 0, "n": 42}, "nonce": "...", "ciphertext": "..."}
+    test_secret18 = secrets.token_bytes(32)
+    bob_priv18 = secrets.token_bytes(32)
+    bob_pub18 = x25519_base(bob_priv18)
+    alice_s18 = init_sender_state(test_secret18, bob_pub18)
+    bob_r18 = init_receiver_state(test_secret18, (bob_priv18, bob_pub18))
+
+    wire_pkt = alice_s18.encrypt_wire(b"Message over the wire")
+    assert wire_pkt.v == 1, "Wire packet version must be 1"
+    assert "dh" in wire_pkt.header, "Header must contain 'dh'"
+    assert wire_pkt.header["n"] == 0, "Header must contain message index n"
+    assert wire_pkt.header["pn"] == 0, "Header must contain previous chain length pn"
+    assert len(base64.b64decode(wire_pkt.nonce)) == 12, "Nonce must be 12 bytes"
+    assert len(base64.b64decode(wire_pkt.ciphertext)) == 4096 + 16, "Ciphertext must be 4KB padded + 16-byte tag"
+
+    wire_json = wire_pkt.to_json()
+    parsed_pkt = WirePacket.from_json(wire_json)
+    assert parsed_pkt.v == 1
+    assert parsed_pkt.header["dh"] == wire_pkt.header["dh"]
+    print("    [PASS] Step 1: Wire packet adheres to standard schema {'v': 1, 'header', 'nonce', 'ciphertext'}.")
+
+    # Test 18.2: Wire Packet validation and corruption rejection
+    # Unsupported version
+    unsupported_v = dict(wire_pkt.to_dict())
+    unsupported_v["v"] = 2
+    try:
+        WirePacket.from_dict(unsupported_v)
+        assert False, "Version 2 must be rejected"
+    except ValueError as e:
+        assert "Unsupported wire packet version" in str(e)
+
+    # Invalid nonce length
+    invalid_nonce = dict(wire_pkt.to_dict())
+    invalid_nonce["nonce"] = base64.b64encode(b"short_nonce").decode()
+    try:
+        WirePacket.from_dict(invalid_nonce)
+        assert False, "Invalid nonce length must be rejected"
+    except ValueError as e:
+        assert "Invalid nonce length" in str(e)
+
+    # Truncated ciphertext (< 16 bytes for auth tag)
+    invalid_ct = dict(wire_pkt.to_dict())
+    invalid_ct["ciphertext"] = base64.b64encode(b"too_short").decode()
+    try:
+        WirePacket.from_dict(invalid_ct)
+        assert False, "Truncated ciphertext must be rejected"
+    except ValueError as e:
+        assert "Invalid ciphertext" in str(e)
+    print("    [PASS] Step 2: Wire packet validator strictly enforces version=1, 12-byte nonce, and AEAD tag length.")
+
+    # Test 18.3: State persistence round-trip
+    # Alice sends a message, Bob decrypts it
+    wire_env = alice_s18.ratchet_encrypt(b"Persistent message 1")
+    bob_r18.ratchet_decrypt(wire_env)
+
+    # Bob sends reply, Alice decrypts it (so both have active DH states and counters)
+    bob_reply_env = bob_r18.ratchet_encrypt(b"Persistent reply 1")
+    alice_s18.ratchet_decrypt(bob_reply_env)
+
+    # Both persist their states to JSON
+    alice_saved_json = alice_s18.to_json()
+    bob_saved_json = bob_r18.to_json()
+
+    # Reconstruct sessions from saved JSON (simulating device reboot / app restart)
+    alice_restored = DoubleRatchetSession.from_json(alice_saved_json)
+    bob_restored = DoubleRatchetSession.from_json(bob_saved_json)
+
+    assert alice_restored.ns == alice_s18.ns, "Restored Ns must match"
+    assert alice_restored.nr == alice_s18.nr, "Restored Nr must match"
+    assert alice_restored.pn == alice_s18.pn, "Restored PNs must match"
+    assert alice_restored.dhs_pub == alice_s18.dhs_pub, "Restored DHs must match"
+    assert alice_restored.dhr_pub == alice_s18.dhr_pub, "Restored DHr must match"
+    assert alice_restored.root_key == alice_s18.root_key, "Restored RootKey must match"
+    assert alice_restored.cks == alice_s18.cks, "Restored CKs must match"
+    assert alice_restored.ckr == alice_s18.ckr, "Restored CKr must match"
+    print("    [PASS] Step 3: Complete state persistence round-trip preserves all keys, chains, and counters.")
+
+    # Test 18.4: Session continuation from restored state
+    # Alice sends message from restored session
+    wire_cont_1 = alice_restored.encrypt_wire(b"Message after cold restart from Alice")
+    pt_cont_1 = bob_restored.ratchet_decrypt(wire_cont_1.to_dict())
+    assert pt_cont_1 == b"Message after cold restart from Alice"
+
+    # Bob replies from restored session
+    wire_cont_2 = bob_restored.encrypt_wire(b"Reply after cold restart from Bob")
+    pt_cont_2 = alice_restored.ratchet_decrypt(wire_cont_2.to_dict())
+    assert pt_cont_2 == b"Reply after cold restart from Bob"
+    print("    [PASS] Step 4: Bidirectional session continuation after cold restart succeeds without key desync.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

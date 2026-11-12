@@ -54,6 +54,12 @@ pub enum RatchetError {
     InvalidPublicKey,
     #[error("Invalid message key")]
     InvalidMessageKey,
+    #[error("Unsupported wire packet version: {0}")]
+    UnsupportedVersion(u32),
+    #[error("Invalid nonce length: expected 12 bytes, got {0}")]
+    InvalidNonceLength(usize),
+    #[error("Invalid ciphertext: expected at least 16 bytes")]
+    InvalidCiphertext,
 }
 
 /// Message header sent in the clear alongside the ciphertext.
@@ -80,14 +86,77 @@ impl MessageHeader {
     }
 }
 
-/// The encrypted message payload containing header, ciphertext, and nonce.
+pub fn default_wire_version() -> u32 {
+    1
+}
+
+/// The wire packet / encrypted message payload transmitted over the server relay.
+///
+/// Follows Sub-Step 4.5 wire packet format:
+/// ```json
+/// {
+///   "v": 1,
+///   "header": {
+///     "dh": "base64_x25519_public_key",
+///     "pn": 0,
+///     "n": 42
+///   },
+///   "nonce": "base64_12_bytes",
+///   "ciphertext": "base64_aes_gcm_output_with_tag"
+/// }
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedEnvelope {
+    #[serde(default = "default_wire_version")]
+    pub v: u32,
     pub header: MessageHeader,
-    /// Base64-encoded AES-256-GCM ciphertext of 4KB padded message
-    pub ciphertext: String,
     /// Base64-encoded 12-byte nonce
     pub nonce: String,
+    /// Base64-encoded AES-256-GCM ciphertext of 4KB padded message
+    pub ciphertext: String,
+}
+
+/// WirePacket alias for wire format compatibility.
+pub type WirePacket = EncryptedEnvelope;
+
+impl EncryptedEnvelope {
+    pub fn new(header: MessageHeader, nonce: String, ciphertext: String) -> Self {
+        Self {
+            v: 1,
+            header,
+            nonce,
+            ciphertext,
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, RatchetError> {
+        serde_json::to_string(self).map_err(RatchetError::Json)
+    }
+
+    pub fn from_json(json_str: &str) -> Result<Self, RatchetError> {
+        let envelope: Self = serde_json::from_str(json_str)?;
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    pub fn validate(&self) -> Result<(), RatchetError> {
+        if self.v != 1 {
+            return Err(RatchetError::UnsupportedVersion(self.v));
+        }
+        let nonce_bytes = BASE64.decode(&self.nonce)?;
+        if nonce_bytes.len() != GCM_NONCE_SIZE {
+            return Err(RatchetError::InvalidNonceLength(nonce_bytes.len()));
+        }
+        let dh_bytes = BASE64.decode(&self.header.dh)?;
+        if dh_bytes.len() != 32 {
+            return Err(RatchetError::InvalidPublicKey);
+        }
+        let ct_bytes = BASE64.decode(&self.ciphertext)?;
+        if ct_bytes.len() < 16 {
+            return Err(RatchetError::InvalidCiphertext);
+        }
+        Ok(())
+    }
 }
 
 /// The complete Double Ratchet Session state.
@@ -389,9 +458,10 @@ impl RatchetSession {
         let ciphertext = encrypt_aes_gcm(&mk, &nonce, plaintext, &aad)?;
 
         Ok(EncryptedEnvelope {
+            v: 1,
             header,
-            ciphertext: BASE64.encode(&ciphertext),
             nonce: BASE64.encode(&nonce),
+            ciphertext: BASE64.encode(&ciphertext),
         })
     }
 
@@ -658,6 +728,18 @@ impl RatchetSession {
             bob_first_message: state.bob_first_message,
         }
     }
+
+    /// Serializes the ratchet session state to a JSON string for persistent encrypted storage.
+    pub fn to_json(&self) -> Result<String, RatchetError> {
+        let serialized = self.to_serialized();
+        serde_json::to_string(&serialized).map_err(RatchetError::Json)
+    }
+
+    /// Deserializes a ratchet session from a JSON string.
+    pub fn from_json(json_str: &str) -> Result<Self, RatchetError> {
+        let serialized: SerializedRatchetSession = serde_json::from_str(json_str)?;
+        Ok(Self::from_serialized(&serialized))
+    }
 }
 
 /// Top-level helper function matching libsignal-style API:
@@ -716,9 +798,10 @@ pub fn decrypt(
     };
 
     let envelope = EncryptedEnvelope {
+        v: 1,
         header: header.clone(),
-        ciphertext: BASE64.encode(&actual_ct),
         nonce: BASE64.encode(&nonce),
+        ciphertext: BASE64.encode(&actual_ct),
     };
     session.ratchet_decrypt(&envelope)
 }

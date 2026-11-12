@@ -142,6 +142,73 @@ void main() {
       };
       expect(() => ratchet.decrypt(bobSession, maliciousPkt), throwsA(isA<StateError>()));
     });
+
+    test('Sub-Step 4.4: DH Ratchet Step & Continuous Rekeying', () {
+      final ratchet = DoubleRatchet();
+      final sharedSecret = Uint8List(32)..fillRange(0, 32, 0x42);
+      final bobRatchetKeyPair = RatchetKeyPair.generate();
+
+      final aliceSession = ratchet.initSenderSession(sharedSecret, bobRatchetKeyPair.publicKey);
+      final bobSession = ratchet.initReceiverSession(sharedSecret, bobRatchetKeyPair);
+
+      // Alice sends message 0
+      final msg0 = ratchet.encrypt(aliceSession, 'Round 1 Alice');
+      final pt0 = ratchet.decrypt(bobSession, msg0);
+      expect(String.fromCharCodes(pt0), equals('Round 1 Alice'));
+      expect(bobSession.dhr, isNotNull);
+
+      // Bob replies: triggers sender DH ratchet turn
+      final reply0 = ratchet.encrypt(bobSession, 'Round 1 Bob reply');
+      final replyPt0 = ratchet.decrypt(aliceSession, reply0);
+      expect(String.fromCharCodes(replyPt0), equals('Round 1 Bob reply'));
+    });
+
+    test('Sub-Step 4.5: Wire Format & State Persistence', () {
+      final ratchet = DoubleRatchet();
+      final sharedSecret = Uint8List(32)..fillRange(0, 32, 0x77);
+      final bobRatchetKeyPair = RatchetKeyPair.generate();
+
+      final aliceSession = ratchet.initSenderSession(sharedSecret, bobRatchetKeyPair.publicKey);
+      final bobSession = ratchet.initReceiverSession(sharedSecret, bobRatchetKeyPair);
+
+      // 1. WirePacket validation and JSON serialization
+      final wirePkt = aliceSession.encryptWire('Hello over the wire');
+      expect(wirePkt.v, equals(1));
+      expect(wirePkt.header['dh'], isNotNull);
+      expect(wirePkt.header['n'], equals(0));
+      expect(wirePkt.header['pn'], equals(0));
+      expect(base64.decode(wirePkt.nonce).length, equals(12));
+
+      final jsonStr = wirePkt.toJsonString();
+      final parsedWire = WirePacket.fromJsonString(jsonStr);
+      expect(parsedWire.v, equals(1));
+      expect(parsedWire.nonce, equals(wirePkt.nonce));
+      expect(parsedWire.ciphertext, equals(wirePkt.ciphertext));
+
+      // Unsupported version rejection
+      final badVersionJson = {'v': 2, 'header': wirePkt.header, 'nonce': wirePkt.nonce, 'ciphertext': wirePkt.ciphertext};
+      expect(() => WirePacket.fromJson(badVersionJson), throwsA(isA<FormatException>()));
+
+      // 2. State Persistence: serialize Alice and Bob state to JSON
+      final aliceSavedJson = aliceSession.toJsonString();
+      final bobSavedJson = bobSession.toJsonString();
+
+      // Restore sessions from saved JSON (simulating app restart)
+      final aliceRestored = DoubleRatchetSession.fromJsonString(aliceSavedJson);
+      final bobRestored = DoubleRatchetSession.fromJsonString(bobSavedJson);
+
+      expect(aliceRestored.ns, equals(aliceSession.ns));
+      expect(bobRestored.bobFirstMessage, equals(bobSession.bobFirstMessage));
+
+      // Decrypt wire packet using restored Bob session
+      final pt = ratchet.decrypt(bobRestored, parsedWire.toJson());
+      expect(String.fromCharCodes(pt), equals('Hello over the wire'));
+
+      // Bob replies using restored session
+      final replyWire = bobRestored.encryptWire('Restored Bob reply');
+      final replyPt = ratchet.decrypt(aliceRestored, replyWire.toJson());
+      expect(String.fromCharCodes(replyPt), equals('Restored Bob reply'));
+    });
   });
 }
 

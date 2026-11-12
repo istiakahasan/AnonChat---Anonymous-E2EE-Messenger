@@ -367,6 +367,49 @@ $$\text{Output}_{64} = \text{HKDF-Expand}(\text{PRK}, \text{info} = \texttt{"Dou
 $$\text{RootKey} = \text{Output}[0..32]$$
 $$\text{ChainKey} = \text{Output}[32..64]$$
 
+### 5.12 Sub-Step 4.5: Wire Format and State Persistence
+
+#### Wire Packet (Relay Transmission Format):
+Every Double Ratchet message transmitted across the blind relay server is serialized as a versioned `WirePacket` JSON envelope:
+```json
+{
+  "v": 1,
+  "header": {
+    "dh": "base64_x25519_public_key",
+    "pn": 0,
+    "n": 42
+  },
+  "nonce": "base64_12_bytes",
+  "ciphertext": "base64_aes_gcm_output_with_tag"
+}
+```
+
+#### Wire Packet Validation Invariants:
+1. `v == 1`: The wire packet version must strictly equal 1. Unsupported or unknown versions are rejected immediately before decryption attempts.
+2. `header.dh`: Must decode to a valid 32-byte Curve25519 public key.
+3. `nonce`: Must decode to exactly 12 bytes (`GCM_NONCE_SIZE`).
+4. `ciphertext`: Must decode to at least 16 bytes (16-byte AES-GCM authentication tag).
+5. The associated authenticated data (AAD) bound during AES-256-GCM encryption is the canonical JSON serialization of the header object (`{"dh": "...", "n": 42, "pn": 0}`).
+
+#### State Persistence & Local Encrypted Storage:
+Double Ratchet sessions maintain critical continuous cryptographic state across ephemeral app processes:
+- `DHs_pub`, `DHs_priv`: Current sender Curve25519 keypair.
+- `DHr`: Current peer Curve25519 public ratchet key (or null during initial handshake).
+- `RK`: Current 32-byte Root Key.
+- `CKs`: Sending chain key (or null pending ratchet turn).
+- `CKr`: Receiving chain key (or null pending peer transmission).
+- `Ns`: Sent message index in current sending chain.
+- `Nr`: Received message index in current receiving chain.
+- `PNs`: Length of previous sending chain.
+- `MKSKIPPED`: Map of skipped message keys (`"dh:msgNum"` $\to$ 32-byte key) for delayed out-of-order delivery.
+- `bob_first_message`: Handshake state flag.
+
+#### Cold Restart & Persistence Guarantees:
+- **Zero Plaintext on Disk**: Ratchet state JSON is never saved in plaintext. It is encrypted in SQLCipher tables (`ratchet_sessions(peer_user_id, session_json, updated_at)`) or serialized into the encrypted backup container using Argon2id-derived keys.
+- **Immediate Resumption**: When an application restarts or awakes from background sleep, active ratchet states are reloaded from SQLCipher into memory. Outbound and inbound message counters ($N_s, N_r$) continue sequentially without key desynchronization.
+- **Zeroization**: In-memory secrets (`Zeroize`, `ZeroizeOnDrop`) are wiped from memory buffers when sessions are closed or dropped.
+
+
 
 
 

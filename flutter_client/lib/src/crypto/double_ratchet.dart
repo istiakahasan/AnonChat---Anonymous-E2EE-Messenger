@@ -44,6 +44,86 @@ class RatchetKeyPair {
   }
 }
 
+/// Double Ratchet Wire Packet format transmitted over the relay server (Sub-Step 4.5).
+///
+/// Layout:
+/// ```json
+/// {
+///   "v": 1,
+///   "header": {
+///     "dh": "base64_x25519_public_key",
+///     "pn": 0,
+///     "n": 42
+///   },
+///   "nonce": "base64_12_bytes",
+///   "ciphertext": "base64_aes_gcm_output_with_tag"
+/// }
+/// ```
+class WirePacket {
+  final int v;
+  final Map<String, dynamic> header;
+  final String nonce;
+  final String ciphertext;
+
+  WirePacket({
+    this.v = 1,
+    required this.header,
+    required this.nonce,
+    required this.ciphertext,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'v': v,
+    'header': header,
+    'nonce': nonce,
+    'ciphertext': ciphertext,
+  };
+
+  String toJsonString() => jsonEncode(toJson());
+
+  factory WirePacket.fromJson(Map<String, dynamic> map) {
+    final v = (map['v'] ?? 1) as int;
+    if (v != 1) {
+      throw FormatException('Unsupported wire packet version: $v');
+    }
+    final header = Map<String, dynamic>.from(map['header'] as Map);
+    final nonce = map['nonce'] as String;
+    final ciphertext = map['ciphertext'] as String;
+
+    final packet = WirePacket(
+      v: v,
+      header: header,
+      nonce: nonce,
+      ciphertext: ciphertext,
+    );
+    packet.validate();
+    return packet;
+  }
+
+  factory WirePacket.fromJsonString(String jsonStr) {
+    final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+    return WirePacket.fromJson(map);
+  }
+
+  void validate() {
+    if (v != 1) {
+      throw FormatException('Unsupported wire packet version: $v');
+    }
+    final nonceBytes = base64.decode(nonce);
+    if (nonceBytes.length != 12) {
+      throw FormatException('Invalid nonce length: expected 12 bytes, got ${nonceBytes.length}');
+    }
+    final dh = (header['dh'] ?? header['dh_pub']) as String?;
+    if (dh == null || base64.decode(dh).length != 32) {
+      throw FormatException('Invalid ratchet public key in wire header');
+    }
+    final ctBytes = base64.decode(ciphertext);
+    if (ctBytes.length < 16) {
+      throw FormatException('Invalid ciphertext length: missing tag');
+    }
+  }
+}
+
 /// Double Ratchet Engine for Flutter / Dart.
 ///
 /// Usage:
@@ -312,12 +392,19 @@ class DoubleRatchetSession {
     final padded = _padTo4KB(plainBytes);
 
     return {
+      'v': 1,
       'header_key': dhB64,
       'header': header,
       'ciphertext': base64.encode(padded),
       'nonce': base64.encode(nonce),
       'mk': base64.encode(mk),
     };
+  }
+
+  /// Encrypts an outbound plaintext message and returns a validated WirePacket (Sub-Step 4.5).
+  WirePacket encryptWire(dynamic plaintext) {
+    final enc = ratchetEncrypt(plaintext);
+    return WirePacket.fromJson(enc);
   }
 
   static const int maxSkip = 100;
@@ -440,6 +527,75 @@ class DoubleRatchetSession {
       nr += 1;
       bobFirstMessage = false;
     }
+  }
+
+  /// Serializes active ratchet state to a JSON-compatible map for encrypted local persistence.
+  Map<String, dynamic> toJson() {
+    final mkSkippedB64 = <String, String>{};
+    mkSkipped.forEach((k, v) {
+      mkSkippedB64[k] = base64.encode(v);
+    });
+
+    return {
+      'DHs_pub': base64.encode(dhs.publicKey),
+      'DHs_priv': base64.encode(dhs.secretKey),
+      'DHr': dhr != null ? base64.encode(dhr!) : null,
+      'RK': base64.encode(rootKey),
+      'CKs': sendingChainKey != null ? base64.encode(sendingChainKey!) : null,
+      'CKr': receivingChainKey != null ? base64.encode(receivingChainKey!) : null,
+      'Ns': ns,
+      'Nr': nr,
+      'PNs': pns,
+      'MKSKIPPED': mkSkippedB64,
+      'bobFirstMessage': bobFirstMessage,
+    };
+  }
+
+  /// Serializes active ratchet state to a JSON string for encrypted storage.
+  String toJsonString() => jsonEncode(toJson());
+
+  /// Reconstructs a Double Ratchet session from a persisted state map.
+  factory DoubleRatchetSession.fromJson(Map<String, dynamic> map, [dynamic sodium]) {
+    final dhsPriv = base64.decode(map['DHs_priv'] as String);
+    final dhsPub = map['DHs_pub'] != null
+        ? base64.decode(map['DHs_pub'] as String)
+        : x25519Base(dhsPriv);
+    final dhr = map['DHr'] != null ? base64.decode(map['DHr'] as String) : null;
+    final rk = base64.decode(map['RK'] as String);
+    final cks = map['CKs'] != null ? base64.decode(map['CKs'] as String) : null;
+    final ckr = map['CKr'] != null ? base64.decode(map['CKr'] as String) : null;
+    final ns = (map['Ns'] ?? 0) as int;
+    final nr = (map['Nr'] ?? 0) as int;
+    final pns = (map['PNs'] ?? 0) as int;
+    final bobFirst = (map['bobFirstMessage'] ?? false) as bool;
+
+    final mkSkipped = <String, Uint8List>{};
+    if (map['MKSKIPPED'] != null) {
+      final skippedMap = map['MKSKIPPED'] as Map;
+      skippedMap.forEach((k, v) {
+        mkSkipped[k.toString()] = base64.decode(v.toString());
+      });
+    }
+
+    return DoubleRatchetSession(
+      dhs: RatchetKeyPair(secretKey: dhsPriv, publicKey: dhsPub),
+      dhr: dhr,
+      rootKey: rk,
+      sendingChainKey: cks,
+      receivingChainKey: ckr,
+      ns: ns,
+      nr: nr,
+      pns: pns,
+      mkSkipped: mkSkipped,
+      bobFirstMessage: bobFirst,
+      sodium: sodium,
+    );
+  }
+
+  /// Reconstructs a Double Ratchet session from a persisted JSON string.
+  factory DoubleRatchetSession.fromJsonString(String jsonStr, [dynamic sodium]) {
+    final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+    return DoubleRatchetSession.fromJson(map, sodium);
   }
 }
 

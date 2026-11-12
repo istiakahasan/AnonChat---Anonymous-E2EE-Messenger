@@ -37,7 +37,7 @@ pub use identity::{
 pub use ratchet::{
     decrypt, encrypt, init_receiver_state, init_sender_state, EncryptedEnvelope,
     IntoReceiverKeypair, MessageHeader, RatchetError, RatchetKeyPair, RatchetSession,
-    SerializedRatchetSession, SerializedSkippedKey,
+    SerializedRatchetSession, SerializedSkippedKey, WirePacket,
 };
 pub use safety_number::{
     compute_individual_fingerprint, derive_safety_number, ContactVerificationState,
