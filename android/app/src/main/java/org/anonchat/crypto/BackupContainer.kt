@@ -205,6 +205,12 @@ object BackupContainer {
                 if (bytes.size < expectedTotal) {
                     throw IllegalArgumentException("Backup payload truncated: expected $expectedTotal bytes, got ${bytes.size}")
                 }
+                // Sub-Step 6.3 Test 4: Validate trailing post-encryption padding bytes.
+                for (i in expectedTotal until bytes.size) {
+                    if (bytes[i] != 0.toByte()) {
+                        throw IllegalArgumentException("invalid padding")
+                    }
+                }
                 val ciphertext = ByteArray(header.ciphertextLen.toInt())
                 System.arraycopy(bytes, HEADER_SIZE, ciphertext, 0, ciphertext.size)
                 return Container(header, ciphertext)

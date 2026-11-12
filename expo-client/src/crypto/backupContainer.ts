@@ -301,6 +301,14 @@ export class BackupContainerService {
       );
     }
 
+    // Sub-Step 6.3 Test 4: Validate trailing post-encryption padding bytes.
+    // If trailing padding is corrupted (contains non-zero bytes), reject immediately.
+    for (let i = expectedTotal; i < containerBytes.length; i++) {
+      if (containerBytes[i] !== 0x00) {
+        throw new Error('invalid padding');
+      }
+    }
+
     const ciphertext = containerBytes.slice(BACKUP_HEADER_SIZE, expectedTotal);
     const aad = headerBytes.slice(0, BACKUP_AAD_SIZE);
 

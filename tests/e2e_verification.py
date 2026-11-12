@@ -1492,6 +1492,11 @@ def run_all_tests():
         if len(file_bytes) < expected_total:
             raise ValueError(f"Payload truncated: expected {expected_total} bytes, got {len(file_bytes)}")
 
+        # Sub-Step 6.3 Test 4: Trailing padding validation
+        if len(file_bytes) > expected_total:
+            if any(b != 0 for b in file_bytes[expected_total:]):
+                raise ValueError("invalid padding")
+
         ciphertext_with_tag = file_bytes[42:expected_total]
         if len(ciphertext_with_tag) < 16:
             raise ValueError("Incorrect passphrase or corrupted backup file.")
@@ -2663,12 +2668,19 @@ def run_all_tests():
     assert restored_sc_plaintext == secret_sc_payload, "Decryption of padded backup must restore exact original payload"
     print("    [PASS] 22.3: Decryptor restores padded containers via header ciphertext_len, discarding padding cleanly.")
 
-    # Test 22.4: Tampering with post-encryption padding zeroes does NOT corrupt payload
+    # Test 22.4: Tampering with post-encryption padding zeroes triggers invalid padding error (Sub-Step 6.3 Test 4)
     tampered_padding_file = bytearray(sc_padded_file)
     tampered_padding_file[-10] ^= 0xFF # Flip bit in trailing padding
-    restored_from_tampered_padding = restore_backup_container(bytes(tampered_padding_file), test_sc_passphrase)
-    assert restored_from_tampered_padding == secret_sc_payload, "Trailing padding alteration must not corrupt authenticated ciphertext"
-    print("    [PASS] 22.4: Trailing padding tamper resistance verified (ciphertext boundary enforced by AAD header).")
+    tampered_padding_caught = False
+    tampered_padding_err = ""
+    try:
+        restore_backup_container(bytes(tampered_padding_file), test_sc_passphrase)
+    except ValueError as e:
+        tampered_padding_caught = True
+        tampered_padding_err = str(e)
+    assert tampered_padding_caught is True, "Trailing padding tampering must fail with 'invalid padding'"
+    assert tampered_padding_err == "invalid padding", f"Expected 'invalid padding', got '{tampered_padding_err}'"
+    print("    [PASS] 22.4: Trailing padding validation strictly enforced (tampering triggers 'invalid padding').")
 
     # Test 22.5: Forbidden-Features Checklist Verification
     # Checklist 1: No compression before encryption (CRIME/BREACH/WhatsApp defense)
@@ -2743,6 +2755,101 @@ def run_all_tests():
         assert "Incremental backups forbidden" in str(e)
     assert incremental_failed is True
     print("    [PASS] 22.6: Sub-Step 6.2 Code Review Assertions strictly enforced across all 4 forbidden features.")
+
+    # 23. TASK: SUB-STEP 6.3 VALIDATION TESTS FOR BACKUP SIDE-CHANNEL RESISTANCE
+    print("\n[+] [Sub-Step 6.3] Running Validation Tests for Backup Side-Channel Resistance...")
+
+    sub_step_passphrase = "Side-Channel-Validation-Passphrase-2026!"
+    block_sz = DEFAULT_BACKUP_BLOCK_SIZE # 64 KiB
+
+    # Test 23.1: Test 1: Size Independence
+    # 1. Create a backup with plaintext "A" (1 byte).
+    # 2. Create a backup with plaintext "A" repeated 1000 times (1000 bytes).
+    # 3. Assert both padded files have identical size.
+    # 4. Assert the ciphertext portions differ (because the plaintexts differ).
+    pt_1b = b"A"
+    pt_1000b = b"A" * 1000
+
+    c_1b = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    key_1b = derive_argon2id_key(sub_step_passphrase, c_1b.salt, 1 << 16, 3, 4)
+    c_1b.encrypt_payload(key_1b, pt_1b)
+    padded_1b = pad_to_block_size_py(c_1b.to_bytes(), block_sz)
+
+    c_1000b = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    key_1000b = derive_argon2id_key(sub_step_passphrase, c_1000b.salt, 1 << 16, 3, 4)
+    c_1000b.encrypt_payload(key_1000b, pt_1000b)
+    padded_1000b = pad_to_block_size_py(c_1000b.to_bytes(), block_sz)
+
+    assert len(padded_1b) == len(padded_1000b) == 65536, "Test 1: Both padded files must have identical size (64 KiB)"
+    assert c_1b.ciphertext != c_1000b.ciphertext, "Test 1: Ciphertexts must differ because plaintexts differ"
+    assert restore_backup_container(padded_1b, sub_step_passphrase) == pt_1b
+    assert restore_backup_container(padded_1000b, sub_step_passphrase) == pt_1000b
+    print("    [PASS] 23.1: Test 1 (Size Independence): 1B vs 1000B plaintexts pad to identical 64 KiB size; ciphertexts differ.")
+
+    # Test 23.2: Test 2: No Compression
+    # 1. Create a backup with highly compressible plaintext (e.g., 10 KB of zeros).
+    # 2. Create a backup with incompressible plaintext (10 KB of random bytes).
+    # 3. Assert both padded files have identical size.
+    # 4. If you accidentally enabled compression, the compressible backup would be smaller. This test catches that.
+    compressible_10kb = b"\x00" * (10 * 1024)
+    incompressible_10kb = secrets.token_bytes(10 * 1024)
+
+    c_comp = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    key_comp = derive_argon2id_key(sub_step_passphrase, c_comp.salt, 1 << 16, 3, 4)
+    c_comp.encrypt_payload(key_comp, compressible_10kb)
+    padded_comp = pad_to_block_size_py(c_comp.to_bytes(), block_sz)
+
+    c_incomp = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    key_incomp = derive_argon2id_key(sub_step_passphrase, c_incomp.salt, 1 << 16, 3, 4)
+    c_incomp.encrypt_payload(key_incomp, incompressible_10kb)
+    padded_incomp = pad_to_block_size_py(c_incomp.to_bytes(), block_sz)
+
+    assert len(padded_comp) == len(padded_incomp) == 65536, "Test 2: Both padded files must have identical size"
+    assert len(c_comp.ciphertext) == len(c_incomp.ciphertext) == (10 * 1024 + 16), "Uncompressed ciphertexts must have identical length without compression"
+    assert restore_backup_container(padded_comp, sub_step_passphrase) == compressible_10kb
+    assert restore_backup_container(padded_incomp, sub_step_passphrase) == incompressible_10kb
+    print("    [PASS] 23.2: Test 2 (No Compression): 10 KB zeros vs 10 KB random bytes produce identical 64 KiB padded size.")
+
+    # Test 23.3: Test 3: No Deduplication
+    # 1. Create backup A with message "hello".
+    # 2. Create backup B with message "hello" repeated twice.
+    # 3. Assert the sizes of A and B are identical (after padding) but the ciphertexts differ.
+    # 4. If deduplication were enabled, B might share a block with A, causing unexpected size or structure differences.
+    msg_hello_a = b"hello"
+    msg_hello_b = b"hellohello"
+
+    c_a = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    key_a = derive_argon2id_key(sub_step_passphrase, c_a.salt, 1 << 16, 3, 4)
+    c_a.encrypt_payload(key_a, msg_hello_a)
+    padded_a = pad_to_block_size_py(c_a.to_bytes(), block_sz)
+
+    c_b = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=secrets.token_bytes(16), nonce=secrets.token_bytes(12))
+    key_b = derive_argon2id_key(sub_step_passphrase, c_b.salt, 1 << 16, 3, 4)
+    c_b.encrypt_payload(key_b, msg_hello_b)
+    padded_b = pad_to_block_size_py(c_b.to_bytes(), block_sz)
+
+    assert len(padded_a) == len(padded_b) == 65536, "Test 3: Both padded backups must have identical size"
+    assert c_a.ciphertext != c_b.ciphertext, "Test 3: Ciphertexts must differ"
+    assert restore_backup_container(padded_a, sub_step_passphrase) == msg_hello_a
+    assert restore_backup_container(padded_b, sub_step_passphrase) == msg_hello_b
+    print("    [PASS] 23.3: Test 3 (No Deduplication): 'hello' vs 'hellohello' pad to identical 64 KiB size; ciphertexts differ.")
+
+    # Test 23.4: Test 4: Padding Validation
+    # 1. Corrupt the padding bytes at the end of a backup file.
+    # 2. Attempt to decrypt.
+    # 3. Assert decryption fails with "invalid padding" error.
+    corrupted_padding_file = bytearray(padded_a)
+    corrupted_padding_file[-1] = 0x55 # Corrupt the last padding byte
+    padding_corruption_failed = False
+    padding_err_msg = ""
+    try:
+        restore_backup_container(bytes(corrupted_padding_file), sub_step_passphrase)
+    except ValueError as e:
+        padding_corruption_failed = True
+        padding_err_msg = str(e)
+    assert padding_corruption_failed is True, "Test 4: Attempting to decrypt corrupted padding must fail"
+    assert padding_err_msg == "invalid padding", f"Test 4: Decryption must fail with 'invalid padding', got '{padding_err_msg}'"
+    print("    [PASS] 23.4: Test 4 (Padding Validation): Corrupting trailing padding bytes strictly rejected with 'invalid padding'.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)

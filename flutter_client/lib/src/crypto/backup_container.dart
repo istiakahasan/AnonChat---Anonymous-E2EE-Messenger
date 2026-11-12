@@ -344,7 +344,7 @@ class BackupContainer {
   }
 
   /// Parses and validates a container from raw file bytes.
-  /// Trailing post-encryption padding zeroes are safely ignored.
+  /// Trailing post-encryption padding bytes are strictly validated (Sub-Step 6.3 Test 4).
   factory BackupContainer.fromBytes(Uint8List bytes) {
     if (bytes.length < backupHeaderSize) {
       throw FormatException('Backup file truncated: expected at least $backupHeaderSize bytes');
@@ -357,6 +357,14 @@ class BackupContainer {
       throw FormatException(
         'Backup payload truncated: header declared ${header.ciphertextLen} bytes, but got ${bytes.length - backupHeaderSize}',
       );
+    }
+
+    // Sub-Step 6.3 Test 4: Validate trailing padding bytes.
+    // If trailing padding is corrupted (contains non-zero bytes), reject immediately.
+    for (var i = expectedTotal; i < bytes.length; i++) {
+      if (bytes[i] != 0x00) {
+        throw const FormatException('invalid padding');
+      }
     }
 
     final ciphertext = Uint8List.fromList(bytes.sublist(backupHeaderSize, expectedTotal));

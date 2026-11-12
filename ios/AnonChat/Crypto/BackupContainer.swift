@@ -175,7 +175,7 @@ public struct BackupContainer {
         }
     }
 
-    public enum BackupError: Error, Equatable {
+    public enum BackupError: Error, Equatable, CustomStringConvertible {
         case headerTruncated
         case invalidMagic
         case unsupportedVersion(UInt8)
@@ -189,6 +189,16 @@ public struct BackupContainer {
         case passphraseTooShort(Int)
         case weakPassphrase(String)
         case saltTooShort
+        case invalidPadding
+
+        public var description: String {
+            switch self {
+            case .invalidPadding:
+                return "invalid padding"
+            default:
+                return "\(self)"
+            }
+        }
     }
 
     public let header: Header
@@ -209,6 +219,16 @@ public struct BackupContainer {
         let expectedTotal = headerSize + Int(header.ciphertextLen)
         guard data.count >= expectedTotal else {
             throw BackupError.payloadTruncated
+        }
+
+        // Sub-Step 6.3 Test 4: Validate trailing post-encryption padding bytes.
+        if data.count > expectedTotal {
+            let padding = data.subdata(in: expectedTotal..<data.count)
+            for byte in padding {
+                if byte != 0x00 {
+                    throw BackupError.invalidPadding
+                }
+            }
         }
 
         let ciphertext = data.subdata(in: headerSize..<expectedTotal)

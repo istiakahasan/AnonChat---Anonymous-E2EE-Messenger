@@ -121,6 +121,8 @@ pub enum BackupContainerError {
     KdfError(String),
     #[error("Backup security policy violation: {0}")]
     SecurityPolicyViolation(String),
+    #[error("invalid padding")]
+    InvalidPadding,
 }
 
 /// Enforces the no-side-channel security policy for the backup pipeline (Sub-Step 6.2).
@@ -732,6 +734,15 @@ impl BackupContainer {
             });
         }
 
+        // Sub-Step 6.3 Test 4: Validate post-encryption padding bytes.
+        // If trailing padding is corrupted (contains non-zero bytes), reject immediately.
+        let padding_bytes = &bytes[expected_total_len..];
+        for &pad_byte in padding_bytes {
+            if pad_byte != 0x00 {
+                return Err(BackupContainerError::InvalidPadding);
+            }
+        }
+
         let ciphertext = bytes[BACKUP_HEADER_SIZE..expected_total_len].to_vec();
         Ok(Self { header, ciphertext })
     }
@@ -950,13 +961,56 @@ mod tests {
         let decrypted = restored_container.decrypt(&key).unwrap();
         assert_eq!(decrypted, plaintext);
 
-        // Tampering with trailing padding zeroes does not corrupt payload decryption
+        // Tampering with trailing padding zeroes triggers invalid padding error (Sub-Step 6.3 Test 4)
         let mut tampered_padding = padded_bytes.clone();
         let last_idx = tampered_padding.len() - 1;
         tampered_padding[last_idx] ^= 0xFF;
-        let restored_tampered = BackupContainer::from_bytes(&tampered_padding).unwrap();
-        let decrypted_tampered = restored_tampered.decrypt(&key).unwrap();
-        assert_eq!(decrypted_tampered, plaintext);
+        assert_eq!(
+            BackupContainer::from_bytes(&tampered_padding),
+            Err(BackupContainerError::InvalidPadding)
+        );
+    }
+
+    #[test]
+    fn test_sub_step_6_3_validation_tests() {
+        let key = [0x77u8; 32];
+        let block_size = DEFAULT_BACKUP_BLOCK_SIZE;
+
+        // Test 1: Size Independence
+        let pt1 = b"A";
+        let pt2 = vec![b'A'; 1000];
+        let b1 = BackupContainer::encrypt(&key, pt1, 1, 6, 1).unwrap().to_padded_bytes(block_size);
+        let b2 = BackupContainer::encrypt(&key, &pt2, 1, 6, 1).unwrap().to_padded_bytes(block_size);
+        assert_eq!(b1.len(), b2.len(), "Test 1: Both padded files must have identical size");
+        let c1 = BackupContainer::from_bytes(&b1).unwrap().ciphertext;
+        let c2 = BackupContainer::from_bytes(&b2).unwrap().ciphertext;
+        assert_ne!(c1, c2, "Test 1: Ciphertexts must differ");
+
+        // Test 2: No Compression
+        let comp_pt = vec![0u8; 10 * 1024];
+        let mut incomp_pt = vec![0u8; 10 * 1024];
+        OsRng.fill_bytes(&mut incomp_pt);
+        let b_comp = BackupContainer::encrypt(&key, &comp_pt, 1, 6, 1).unwrap().to_padded_bytes(block_size);
+        let b_incomp = BackupContainer::encrypt(&key, &incomp_pt, 1, 6, 1).unwrap().to_padded_bytes(block_size);
+        assert_eq!(b_comp.len(), b_incomp.len(), "Test 2: Highly compressible and incompressible plaintexts must pad to identical size");
+
+        // Test 3: No Deduplication
+        let msg_a = b"hello";
+        let msg_b = b"hello hello";
+        let b_a = BackupContainer::encrypt(&key, msg_a, 1, 6, 1).unwrap().to_padded_bytes(block_size);
+        let b_b = BackupContainer::encrypt(&key, msg_b, 1, 6, 1).unwrap().to_padded_bytes(block_size);
+        assert_eq!(b_a.len(), b_b.len(), "Test 3: Backup sizes must be identical after padding");
+        let c_a = BackupContainer::from_bytes(&b_a).unwrap().ciphertext;
+        let c_b = BackupContainer::from_bytes(&b_b).unwrap().ciphertext;
+        assert_ne!(c_a, c_b, "Test 3: Ciphertexts must differ");
+
+        // Test 4: Padding Validation
+        let mut corrupted_padding = b_a.clone();
+        let last_idx = corrupted_padding.len() - 1;
+        corrupted_padding[last_idx] = 0xAA;
+        let err = BackupContainer::from_bytes(&corrupted_padding).unwrap_err();
+        assert_eq!(err, BackupContainerError::InvalidPadding, "Test 4: Corrupting padding bytes must fail with invalid padding");
+        assert_eq!(err.to_string(), "invalid padding");
     }
 }
 

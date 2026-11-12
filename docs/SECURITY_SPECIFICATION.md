@@ -504,8 +504,8 @@ fn pad_to_block_size(data: Vec<u8>, block_size: usize) -> Vec<u8> {
 
 #### Key Invariants:
 1. **Always-Pad Invariant**: Even if `data.len()` is already an exact multiple of `block_size`, an additional `block_size` bytes of padding are appended. This guarantees that an adversary cannot deduce that a backup was already aligned.
-2. **Payload Boundary Isolation**: The 42-byte header explicitly declares `ciphertext_len`. On restore, the decryptor reads exactly `header.ciphertext_len` bytes starting at offset 42, authenticates the AES-256-GCM tag, and safely ignores the trailing padding zeroes.
-3. **Tamper Independence**: Because the GCM authentication tag covers only the ciphertext body and the 38-byte AAD header, trailing padding bytes cannot be manipulated to alter the decrypted plaintext.
+2. **Payload Boundary Isolation & Padding Validation**: The 42-byte header explicitly declares `ciphertext_len`. On restore, the decryptor reads exactly `header.ciphertext_len` bytes starting at offset 42, authenticates the AES-256-GCM tag, and strictly validates that all trailing bytes are `0x00` padding zeroes (Sub-Step 6.3 Test 4). If any padding byte is non-zero, decryption aborts immediately with `"invalid padding"`.
+3. **Tamper Independence**: Because the GCM authentication tag covers the ciphertext body and the 38-byte AAD header, altering padding bytes cannot tamper with decrypted plaintext, while strict padding validation rejects corrupted or covertly manipulated padding.
 
 ---
 
@@ -535,3 +535,40 @@ assert!(!compression_enabled, "Compression must be disabled");
 assert!(!deduplication_enabled, "Deduplication must be disabled");
 assert!(backup_is_full_not_incremental, "Incremental backups forbidden");
 ```
+
+---
+
+### 6.4 Validation Tests for Side-Channel Resistance (Sub-Step 6.3)
+
+To ensure ongoing regression protection and cross-platform fidelity against size-based side-channel leaks, the backup pipeline implements 4 mandatory validation tests:
+
+#### Test 1: Size Independence
+- **Objective**: Verify that ciphertext size does not leak message length or volume.
+- **Procedure**:
+  1. Create a backup with plaintext `"A"` (1 byte).
+  2. Create a backup with plaintext `"A"` repeated 1,000 times (1,000 bytes).
+  3. Assert both padded container files have **identical size** (e.g. 64 KiB).
+  4. Assert the ciphertext portions differ due to distinct plaintexts and unique per-backup nonces/salts.
+
+#### Test 2: No Compression
+- **Objective**: Detect accidental introduction of compression layers before encryption.
+- **Procedure**:
+  1. Create a backup with highly compressible plaintext (10 KB of zeroes, `0x00`).
+  2. Create a backup with incompressible plaintext (10 KB of random bytes from CSPRNG).
+  3. Assert both padded container files have **identical size** (64 KiB).
+  4. Assert unpadded ciphertexts have identical lengths ($10\text{ KB} + 16\text{ bytes tag}$), proving compression is completely absent.
+
+#### Test 3: No Deduplication
+- **Objective**: Verify that identical content across backups does not produce shared blocks or cross-backup size artifacts.
+- **Procedure**:
+  1. Create Backup A with message `"hello"`.
+  2. Create Backup B with message `"hello hello"`.
+  3. Assert the sizes of A and B are **identical after padding** (64 KiB).
+  4. Assert the ciphertexts differ completely due to unique CSPRNG salts and nonces.
+
+#### Test 4: Padding Validation
+- **Objective**: Prevent covert-channel tag smuggling, malleability, or corrupted padding trailing bytes.
+- **Procedure**:
+  1. Corrupt the padding bytes at the end of a backup container (e.g., set the trailing padding byte to `0x55` or flip bits).
+  2. Attempt to decrypt or restore the container.
+  3. Assert that restoration fails immediately with an explicit **`"invalid padding"`** error, rather than proceeding silently.
