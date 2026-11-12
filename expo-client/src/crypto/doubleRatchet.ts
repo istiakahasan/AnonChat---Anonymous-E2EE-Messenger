@@ -777,3 +777,54 @@ export async function ratchetDecrypt(
 
   return unpad4KB(new Uint8Array(ptBuffer));
 }
+
+/**
+ * Sub-Step SM.3: Persist ratchet state durably before releasing ciphertext to network.
+ *
+ * Research on libsignal store implementations explicitly warns:
+ * "The Double Ratchet has no per-message random nonce guard, so a write that is lost (crash, unflushed buffer)
+ * or rolled back (restored backup, cloned image) makes the next send reuse a message key and IV it has
+ * already used — which costs confidentiality, forward secrecy and replay protection" [citation:25].
+ *
+ * Required Behavior:
+ * 1. After encrypt(), serialize full ratchet state.
+ * 2. Write serialized state to durable storage (fsync / synchronous = FULL).
+ * 3. ONLY after the write is confirmed durable, send ciphertext over network.
+ */
+export async function durableRatchetEncrypt(
+  state: RatchetState,
+  plaintext: Uint8Array | string,
+  saveDurable: (serializedState: string) => Promise<void>,
+  sendOverNetwork: (envelope: RatchetEnvelope) => Promise<void>,
+  performDhRatchetSend?: () => Promise<void>
+): Promise<RatchetEnvelope> {
+  const envelope = await ratchetEncrypt(state, plaintext, performDhRatchetSend);
+  const serialized = JSON.stringify(state);
+  await saveDurable(serialized);
+  await sendOverNetwork(envelope);
+  return envelope;
+}
+
+/**
+ * Sub-Step SM.3: Persist ratchet state durably before acting on / delivering decrypted plaintext.
+ *
+ * Required Behavior:
+ * 1. After decrypt(), serialize full ratchet state.
+ * 2. Write serialized state to durable storage (fsync / synchronous = FULL).
+ * 3. ONLY after the write is confirmed durable, deliver or display plaintext.
+ */
+export async function durableRatchetDecrypt(
+  state: RatchetState,
+  header: RatchetMessageHeader,
+  nonce: Uint8Array | string,
+  ciphertext: Uint8Array | string,
+  saveDurable: (serializedState: string) => Promise<void>,
+  deliverOrDisplay: (plaintext: Uint8Array) => Promise<void>,
+  performDhRatchet?: (state: RatchetState, peerDhPub: string) => Promise<void>
+): Promise<Uint8Array> {
+  const plaintext = await ratchetDecrypt(state, header, nonce, ciphertext, performDhRatchet);
+  const serialized = JSON.stringify(state);
+  await saveDurable(serialized);
+  await deliverOrDisplay(plaintext);
+  return plaintext;
+}

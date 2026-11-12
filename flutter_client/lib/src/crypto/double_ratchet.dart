@@ -407,6 +407,47 @@ class DoubleRatchetSession {
     return WirePacket.fromJson(enc);
   }
 
+  /// Sub-Step SM.3: Persist ratchet state durably before releasing ciphertext to network.
+  ///
+  /// Research on libsignal store implementations explicitly warns:
+  /// "The Double Ratchet has no per-message random nonce guard, so a write that is lost (crash, unflushed buffer)
+  /// or rolled back (restored backup, cloned image) makes the next send reuse a message key and IV it has
+  /// already used — which costs confidentiality, forward secrecy and replay protection" [citation:25].
+  ///
+  /// Required Behavior:
+  /// 1. After encrypt(), serialize full ratchet state.
+  /// 2. Write serialized state to durable storage (fsync / synchronous = FULL).
+  /// 3. ONLY after the write is confirmed durable, send ciphertext over network.
+  Future<Map<String, dynamic>> durableRatchetEncrypt({
+    required dynamic plaintext,
+    required Future<void> Function(String serializedState) saveDurable,
+    required Future<void> Function(Map<String, dynamic> envelope) sendOverNetwork,
+  }) async {
+    final envelope = ratchetEncrypt(plaintext);
+    final serialized = toJsonString();
+    await saveDurable(serialized);
+    await sendOverNetwork(envelope);
+    return envelope;
+  }
+
+  /// Sub-Step SM.3: Persist ratchet state durably before acting on / delivering decrypted plaintext.
+  ///
+  /// Required Behavior:
+  /// 1. After decrypt(), serialize full ratchet state.
+  /// 2. Write serialized state to durable storage (fsync / synchronous = FULL).
+  /// 3. ONLY after the write is confirmed durable, deliver or display plaintext.
+  Future<Uint8List> durableRatchetDecrypt({
+    required Map<String, dynamic> envelope,
+    required Future<void> Function(String serializedState) saveDurable,
+    required Future<void> Function(Uint8List plaintext) deliverOrDisplay,
+  }) async {
+    final plaintext = ratchetDecrypt(envelope);
+    final serialized = toJsonString();
+    await saveDurable(serialized);
+    await deliverOrDisplay(plaintext);
+    return plaintext;
+  }
+
   static const int maxSkip = 100;
   static const int maxSkipGap = maxSkip;
   static const int maxSkippedKeys = 1000;

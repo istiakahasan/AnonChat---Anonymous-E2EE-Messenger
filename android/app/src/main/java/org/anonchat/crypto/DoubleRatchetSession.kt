@@ -339,5 +339,63 @@ class DoubleRatchetSession private constructor(
         buffer.get(payload)
         return payload
     }
+
+    /**
+     * Serializes active ratchet state to JSON for encrypted durable storage.
+     */
+    fun toJsonString(): String {
+        val root = JSONObject()
+        root.put("DHs_priv", base64Encoder.encodeToString(dhsPrivate.encoded))
+        root.put("DHs_pub", base64Encoder.encodeToString(dhsPublic.encoded))
+        root.put("DHr", dhrPublic?.let { base64Encoder.encodeToString(it.encoded) })
+        root.put("RK", base64Encoder.encodeToString(rootKey))
+        root.put("CKs", sendingChainKey?.let { base64Encoder.encodeToString(it) })
+        root.put("CKr", receivingChainKey?.let { base64Encoder.encodeToString(it) })
+        root.put("Ns", ns)
+        root.put("Nr", nr)
+        root.put("PNs", pn)
+        root.put("bob_first_message", bobFirstMessage)
+        val skippedObj = JSONObject()
+        for ((k, v) in skippedMessageKeys) {
+            skippedObj.put("${k.first}:${k.second}", base64Encoder.encodeToString(v))
+        }
+        root.put("MKSKIPPED", skippedObj)
+        return root.toString()
+    }
+
+    /**
+     * Sub-Step SM.3: Persist ratchet state durably before releasing ciphertext to network.
+     *
+     * Research on libsignal store implementations explicitly warns:
+     * "The Double Ratchet has no per-message random nonce guard, so a write that is lost (crash, unflushed buffer)
+     * or rolled back (restored backup, cloned image) makes the next send reuse a message key and IV it has
+     * already used — which costs confidentiality, forward secrecy and replay protection" [citation:25].
+     */
+    fun durableRatchetEncrypt(
+        plaintext: ByteArray,
+        saveDurable: (sessionJson: String) -> Unit,
+        sendOverNetwork: (envelope: EncryptedEnvelope) -> Unit
+    ): EncryptedEnvelope {
+        val envelope = ratchetEncrypt(plaintext)
+        val serialized = toJsonString()
+        saveDurable(serialized)
+        sendOverNetwork(envelope)
+        return envelope
+    }
+
+    /**
+     * Sub-Step SM.3: Persist ratchet state durably before acting on / delivering decrypted plaintext.
+     */
+    fun durableRatchetDecrypt(
+        envelope: EncryptedEnvelope,
+        saveDurable: (sessionJson: String) -> Unit,
+        deliverOrDisplay: (plaintext: ByteArray) -> Unit
+    ): ByteArray {
+        val plaintext = ratchetDecrypt(envelope)
+        val serialized = toJsonString()
+        saveDurable(serialized)
+        deliverOrDisplay(plaintext)
+        return plaintext
+    }
 }
 

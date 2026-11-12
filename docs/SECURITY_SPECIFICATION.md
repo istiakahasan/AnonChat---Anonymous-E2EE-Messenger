@@ -541,6 +541,64 @@ key = Argon2id(recoveryCode, salt, memory, iterations, parallelism, 32)
 
 ---
 
+### 5.15 Sub-Step SM.3: State Persistence Durability (Critical for Key Uniqueness)
+
+#### 1. The Threat: Catastrophic Key/Nonce Reuse in AES-256-GCM
+If an application crashes, loses power, or is killed after encrypting a message but before persisting the advanced Double Ratchet state to non-volatile disk, the reloaded session on restart will begin at the unadvanced chain key and message index ($N_s$).
+
+Under AES-256-GCM, reusing a message key $MK$ and nonce $N$:
+- **Confidentiality Destruction**: $C_1 \oplus C_2 = P_1 \oplus P_2$, leaking the direct XOR of two distinct plaintexts.
+- **Universal Forgery (Joux Attack)**: In Galois/Counter Mode (GCM), encrypting two distinct messages with the same $(K, IV)$ pair reveals the GHASH authentication subkey $H = E_K(0^{128})$, allowing an attacker to forge arbitrary valid ciphertext tags and modify packets undetected.
+- **Forward Secrecy Loss**: Rolling back state resurrects previously zeroized message keys.
+
+Research on libsignal store implementations explicitly warns:
+> *"The Double Ratchet has no per-message random nonce guard, so a write that is lost (crash, unflushed buffer) or rolled back (restored backup, cloned image) makes the next send reuse a message key and IV it has already used — which costs confidentiality, forward secrecy and replay protection"* [citation:25].
+
+#### 2. Three-Phase Commit Pipeline
+
+##### Encrypt Path (Outbound Transmission):
+```text
+┌─────────────────┐     ┌───────────────────────┐     ┌────────────────────────────┐     ┌─────────────────────┐
+│ 1. Encrypt      │ ──> │ 2. Serialize State    │ ──> │ 3. Durable Storage Flush   │ ──> │ 4. Network Send     │
+│    ratchet_enc()│     │    session.to_json()  │     │    store.save_durable()    │     │    network.send()   │
+└─────────────────┘     └───────────────────────┘     └────────────────────────────┘     └─────────────────────┘
+                                                                    │
+                                                           [If write fails/crashes]
+                                                                    │
+                                                                    ▼
+                                                         [Abort: DO NOT transmit]
+```
+1. `(header, ciphertext) = encrypt(&mut state, plaintext, aad)?;`
+2. `let serialized = serialize_state(&state)?;`
+3. `store.save_durable(&serialized)?;`  // Must fsync or use SQLite synchronous=FULL
+4. **ONLY AFTER durable save succeeds**: `network.send(header, ciphertext)?;`
+
+##### Decrypt Path (Inbound Delivery):
+1. `let plaintext = decrypt(&mut state, &header, &ciphertext, aad)?;`
+2. `let serialized = serialize_state(&state)?;`
+3. `store.save_durable(&serialized)?;`  // Must fsync or use SQLite synchronous=FULL
+4. **ONLY AFTER durable save succeeds**: `deliver_or_display(plaintext)?;`
+
+#### 3. Storage Engine Durability (SQLite / SQLCipher Configuration)
+To guarantee ACID durability across OS crashes, unexpected power loss, and unflushed filesystem buffers:
+- **`PRAGMA synchronous = FULL;`** (or `EXTRA`): Guarantees SQLite waits for operating system `fsync()` flushing dirty pages to persistent media before completing write transactions.
+- **`PRAGMA journal_mode = WAL;`**: Write-Ahead Logging commits transactions atomically into the WAL file, maintaining durability while providing non-blocking concurrent reads.
+- **Immediate Transactions**: Durable ratchet state saves execute inside `BEGIN IMMEDIATE` transactions, preventing write lock starvation.
+
+#### 4. Cross-Platform Storage Contracts
+All client platforms implement explicit durable persist-before-release guards:
+- **Rust Client & Crypto Core**:
+  - `anonchat_crypto::DurableRatchetStore` trait.
+  - `anonchat_crypto::durable_encrypt_and_send` & `anonchat_crypto::durable_decrypt_and_deliver`.
+  - `ClientDatabase::save_ratchet_session_durable` & `ClientDatabase::save_ratchet_state_durable`.
+  - `AnonChatEngine::send_message` and `AnonChatEngine::receive_messages` enforce persistence prior to `send_blob` and UI message emission.
+- **Flutter / Dart**: `DoubleRatchetSession.durableRatchetEncrypt` and `durableRatchetDecrypt` requiring async `saveDurable` completion before `sendOverNetwork` / `deliverOrDisplay`.
+- **React Native (Expo) & Web**: `durableRatchetEncrypt` and `durableRatchetDecrypt` awaiting durable persistence before network emit or plaintext dispatch.
+- **Android / Kotlin**: `DoubleRatchetSession.durableRatchetEncrypt` and `durableRatchetDecrypt` enforcing synchronous storage commit.
+- **iOS / Swift**: `DoubleRatchetSession.durableRatchetEncrypt` and `durableRatchetDecrypt` enforcing synchronous storage commit.
+
+---
+
 ## 6. Avoid Backup Side Channels
 
 ### 6.1 Threat Model: Size-Based Side Channels

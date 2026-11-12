@@ -42,9 +42,10 @@ pub use identity::{
     SerializedIdentityState, SerializedOneTimePreKey, DEFAULT_ONE_TIME_PREKEYS_COUNT,
 };
 pub use ratchet::{
-    decrypt, encrypt, init_receiver_state, init_sender_state, EncryptedEnvelope,
-    IntoReceiverKeypair, MessageHeader, RatchetError, RatchetKeyPair, RatchetSession,
-    SerializedRatchetSession, SerializedSkippedKey, WirePacket,
+    decrypt, durable_decrypt_and_deliver, durable_encrypt_and_send, encrypt, init_receiver_state,
+    init_sender_state, DurableRatchetStore, EncryptedEnvelope, IntoReceiverKeypair, MessageHeader,
+    RatchetError, RatchetKeyPair, RatchetSession, SerializedRatchetSession, SerializedSkippedKey,
+    WirePacket,
 };
 pub use safety_number::{
     compute_individual_fingerprint, derive_safety_number, ContactVerificationState,

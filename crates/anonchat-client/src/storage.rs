@@ -87,6 +87,10 @@ impl ClientDatabase {
         let key_hex = hex::encode(encryption_key.expose_secret().0);
         conn.pragma_update(None, "key", &format!("x'{}'", key_hex))?;
 
+        // Sub-Step SM.3: Configure durable writes with synchronous = FULL and journal_mode = WAL
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+
         // Verify cipher operation
         conn.query_row("SELECT count(*) FROM sqlite_master;", [], |_| Ok(()))?;
 
@@ -103,6 +107,7 @@ impl ClientDatabase {
         let conn = Connection::open_in_memory()?;
         let key_hex = hex::encode(encryption_key.expose_secret().0);
         conn.pragma_update(None, "key", &format!("x'{}'", key_hex))?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -362,11 +367,17 @@ impl ClientDatabase {
         });
     }
 
-    /// Saves a ratchet session JSON into the encrypted database.
-    pub fn save_ratchet_session(&self, peer_user_id: &str, session_json: &str) -> Result<(), LocalDbError> {
-        let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+    /// Durably persists ratchet session state into SQLCipher storage with synchronous = FULL.
+    ///
+    /// Sub-Step SM.3: Persist ratchet state durably before releasing ciphertext.
+    /// Guarantees that the updated sending/receiving chain keys and counters are written to disk
+    /// before network transmission or message display, preventing key/nonce reuse on crash.
+    pub fn save_ratchet_session_durable(&self, peer_user_id: &str, session_json: &str) -> Result<(), LocalDbError> {
+        let mut conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
         let now = Utc::now().timestamp();
-        conn.execute(
+        let tx = conn.transaction()?;
+        tx.execute(
             r#"
             INSERT INTO ratchet_sessions (peer_user_id, session_json, updated_at)
             VALUES (?1, ?2, ?3)
@@ -376,18 +387,33 @@ impl ClientDatabase {
             "#,
             params![peer_user_id, session_json, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Saves a RatchetSession directly into the encrypted database.
-    pub fn save_ratchet_state(
+    /// Saves a ratchet session JSON into the encrypted database (durably committed).
+    pub fn save_ratchet_session(&self, peer_user_id: &str, session_json: &str) -> Result<(), LocalDbError> {
+        self.save_ratchet_session_durable(peer_user_id, session_json)
+    }
+
+    /// Durably saves a RatchetSession directly into the encrypted database.
+    pub fn save_ratchet_state_durable(
         &self,
         peer_user_id: &str,
         session: &anonchat_crypto::RatchetSession,
     ) -> Result<(), LocalDbError> {
         let serialized = session.to_serialized();
         let json = serde_json::to_string(&serialized)?;
-        self.save_ratchet_session(peer_user_id, &json)
+        self.save_ratchet_session_durable(peer_user_id, &json)
+    }
+
+    /// Saves a RatchetSession directly into the encrypted database (durably committed).
+    pub fn save_ratchet_state(
+        &self,
+        peer_user_id: &str,
+        session: &anonchat_crypto::RatchetSession,
+    ) -> Result<(), LocalDbError> {
+        self.save_ratchet_state_durable(peer_user_id, session)
     }
 
     /// Loads and reconstructs a RatchetSession from the encrypted database.
@@ -586,6 +612,14 @@ impl ClientDatabase {
             data.messages.len()
         );
         Ok(())
+    }
+}
+
+impl anonchat_crypto::DurableRatchetStore for ClientDatabase {
+    type Error = LocalDbError;
+
+    fn save_durable(&self, peer_id: &str, serialized_state: &str) -> Result<(), Self::Error> {
+        self.save_ratchet_session_durable(peer_id, serialized_state)
     }
 }
 

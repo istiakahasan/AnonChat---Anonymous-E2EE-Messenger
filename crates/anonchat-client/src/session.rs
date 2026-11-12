@@ -65,6 +65,10 @@ impl AnonChatEngine {
             let env = ratchet
                 .ratchet_encrypt(plaintext.as_bytes())
                 .context("Ratchet encrypt failed")?;
+            // Sub-Step SM.3: Persist ratchet state durably BEFORE releasing ciphertext to network
+            self.db
+                .save_ratchet_state_durable(recipient_user_id, ratchet)
+                .context("Failed to durably persist ratchet state before network transmission")?;
             (env, None)
         } else {
             // First message: perform X3DH key agreement
@@ -84,6 +88,11 @@ impl AnonChatEngine {
             let env = ratchet
                 .ratchet_encrypt(plaintext.as_bytes())
                 .context("Initial ratchet encrypt failed")?;
+
+            // Sub-Step SM.3: Persist ratchet state durably BEFORE releasing ciphertext to network
+            self.db
+                .save_ratchet_state_durable(recipient_user_id, &ratchet)
+                .context("Failed to durably persist initial ratchet state before network transmission")?;
 
             ratchets.insert(recipient_user_id.to_string(), ratchet);
             (env, Some(initiation))
@@ -211,6 +220,12 @@ impl AnonChatEngine {
                     continue;
                 }
             };
+
+            // Sub-Step SM.3: Persist ratchet state durably before acting on / displaying plaintext
+            if let Err(e) = self.db.save_ratchet_state_durable(&sender_id, ratchet) {
+                warn!("Failed to durably persist ratchet state after decrypt: {}", e);
+                continue;
+            }
 
             let plaintext = match String::from_utf8(plaintext_bytes) {
                 Ok(s) => s,

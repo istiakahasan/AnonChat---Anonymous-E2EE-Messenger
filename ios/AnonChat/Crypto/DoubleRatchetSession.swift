@@ -347,5 +347,67 @@ public class DoubleRatchetSession {
 
         return (nextCk, mk)
     }
+
+    /// Serializes active ratchet state to JSON for encrypted durable persistence.
+    public func toJsonString() -> String {
+        var dict: [String: Any] = [:]
+        dict["DHs_pub"] = dhsPublic.rawRepresentation.base64EncodedString()
+        dict["DHs_priv"] = dhsPrivate.rawRepresentation.base64EncodedString()
+        if let dhr = dhrPublic {
+            dict["DHr"] = dhr.rawRepresentation.base64EncodedString()
+        }
+        dict["RK"] = rootKey.withUnsafeBytes { Data($0).base64EncodedString() }
+        if let cks = sendingChainKey {
+            dict["CKs"] = cks.withUnsafeBytes { Data($0).base64EncodedString() }
+        }
+        if let ckr = receivingChainKey {
+            dict["CKr"] = ckr.withUnsafeBytes { Data($0).base64EncodedString() }
+        }
+        dict["Ns"] = ns
+        dict["Nr"] = nr
+        dict["PNs"] = pn
+        dict["bob_first_message"] = bobFirstMessage
+        var skippedDict: [String: String] = [:]
+        for (k, v) in skippedKeys {
+            skippedDict[k] = v.withUnsafeBytes { Data($0).base64EncodedString() }
+        }
+        dict["MKSKIPPED"] = skippedDict
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let str = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return str
+    }
+
+    /// Sub-Step SM.3: Persist ratchet state durably before releasing ciphertext to network.
+    ///
+    /// Research on libsignal store implementations explicitly warns:
+    /// "The Double Ratchet has no per-message random nonce guard, so a write that is lost (crash, unflushed buffer)
+    /// or rolled back (restored backup, cloned image) makes the next send reuse a message key and IV it has
+    /// already used — which costs confidentiality, forward secrecy and replay protection" [citation:25].
+    public func durableRatchetEncrypt(
+        plaintext: Data,
+        saveDurable: (String) throws -> Void,
+        sendOverNetwork: (EncryptedEnvelope) throws -> Void
+    ) throws -> EncryptedEnvelope {
+        let envelope = try ratchetEncrypt(plaintext: plaintext)
+        let serialized = toJsonString()
+        try saveDurable(serialized)
+        try sendOverNetwork(envelope)
+        return envelope
+    }
+
+    /// Sub-Step SM.3: Persist ratchet state durably before acting on / delivering decrypted plaintext.
+    public func durableRatchetDecrypt(
+        envelope: EncryptedEnvelope,
+        saveDurable: (String) throws -> Void,
+        deliverOrDisplay: (Data) throws -> Void
+    ) throws -> Data {
+        let plaintext = try ratchetDecrypt(envelope: envelope)
+        let serialized = toJsonString()
+        try saveDurable(serialized)
+        try deliverOrDisplay(plaintext)
+        return plaintext
+    }
 }
 

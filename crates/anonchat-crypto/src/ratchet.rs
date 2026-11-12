@@ -62,6 +62,10 @@ pub enum RatchetError {
     InvalidCiphertext,
     #[error("Duplicate or already-consumed message: message key cannot be reused")]
     DuplicateOrOldMessage,
+    #[error("Durable storage error: {0}")]
+    DurableStorage(String),
+    #[error("Network dispatch error: {0}")]
+    NetworkDispatch(String),
 }
 
 /// Message header sent in the clear alongside the ciphertext.
@@ -767,6 +771,128 @@ impl RatchetSession {
         let serialized: SerializedRatchetSession = serde_json::from_str(json_str)?;
         Ok(Self::from_serialized(&serialized))
     }
+
+    /// Sub-Step SM.3: Encrypts plaintext and durably commits updated ratchet state before calling network dispatch.
+    ///
+    /// Threat Model Defense:
+    /// Research on libsignal store implementations explicitly warns:
+    /// "The Double Ratchet has no per-message random nonce guard, so a write that is lost (crash, unflushed buffer)
+    /// or rolled back (restored backup, cloned image) makes the next send reuse a message key and IV it has
+    /// already used — which costs confidentiality, forward secrecy and replay protection" [citation:25].
+    ///
+    /// Strict Order of Execution:
+    /// 1. Encrypt plaintext under current ratchet state -> envelope.
+    /// 2. Serialize updated ratchet state to JSON.
+    /// 3. Save serialized state durably (SQLite synchronous=FULL / fsync).
+    /// 4. ONLY AFTER the write is confirmed durable, dispatch the ciphertext over network.
+    pub fn durable_encrypt<S, F, R, E>(
+        &mut self,
+        peer_id: &str,
+        plaintext: &[u8],
+        store: &S,
+        send_fn: F,
+    ) -> Result<R, RatchetError>
+    where
+        S: DurableRatchetStore,
+        F: FnOnce(&EncryptedEnvelope) -> Result<R, E>,
+        E: std::fmt::Display,
+    {
+        durable_encrypt_and_send(self, peer_id, plaintext, store, send_fn)
+    }
+
+    /// Sub-Step SM.3: Decrypts inbound envelope and durably commits updated ratchet state before delivering plaintext.
+    ///
+    /// Strict Order of Execution:
+    /// 1. Decrypt ciphertext under current ratchet state -> plaintext.
+    /// 2. Serialize updated ratchet state to JSON.
+    /// 3. Save serialized state durably (SQLite synchronous=FULL / fsync).
+    /// 4. ONLY AFTER the write is confirmed durable, deliver or display plaintext.
+    pub fn durable_decrypt<S, F, R, E>(
+        &mut self,
+        peer_id: &str,
+        envelope: &EncryptedEnvelope,
+        store: &S,
+        deliver_fn: F,
+    ) -> Result<R, RatchetError>
+    where
+        S: DurableRatchetStore,
+        F: FnOnce(&[u8]) -> Result<R, E>,
+        E: std::fmt::Display,
+    {
+        durable_decrypt_and_deliver(self, peer_id, envelope, store, deliver_fn)
+    }
+}
+
+/// Trait representing durable storage for ratchet session state (Sub-Step SM.3).
+///
+/// Ensures state is written with fsync / SQLite synchronous = FULL.
+pub trait DurableRatchetStore {
+    type Error: std::fmt::Display;
+
+    /// Writes serialized ratchet state durably to storage before release of ciphertext or plaintext.
+    fn save_durable(&self, peer_id: &str, serialized_state: &str) -> Result<(), Self::Error>;
+}
+
+/// Sub-Step SM.3: Durable encrypt-and-send pipeline function.
+///
+/// Pattern:
+/// 1. Encrypt plaintext under current state
+/// 2. Serialize ratchet state to JSON
+/// 3. Save serialized state durably (fsync / synchronous=FULL)
+/// 4. ONLY AFTER durable write succeeds, invoke network send callback
+pub fn durable_encrypt_and_send<S, F, R, E>(
+    session: &mut RatchetSession,
+    peer_id: &str,
+    plaintext: &[u8],
+    store: &S,
+    send_fn: F,
+) -> Result<R, RatchetError>
+where
+    S: DurableRatchetStore,
+    F: FnOnce(&EncryptedEnvelope) -> Result<R, E>,
+    E: std::fmt::Display,
+{
+    // 1. Encrypt
+    let envelope = session.ratchet_encrypt(plaintext)?;
+    // 2. Serialize state
+    let serialized = session.to_json()?;
+    // 3. Save durably
+    store
+        .save_durable(peer_id, &serialized)
+        .map_err(|e| RatchetError::DurableStorage(e.to_string()))?;
+    // 4. Send over network ONLY after durable write confirmed
+    send_fn(&envelope).map_err(|e| RatchetError::NetworkDispatch(e.to_string()))
+}
+
+/// Sub-Step SM.3: Durable decrypt-and-deliver pipeline function.
+///
+/// Pattern:
+/// 1. Decrypt inbound message under current state
+/// 2. Serialize ratchet state to JSON
+/// 3. Save serialized state durably (fsync / synchronous=FULL)
+/// 4. ONLY AFTER durable write succeeds, deliver or display plaintext
+pub fn durable_decrypt_and_deliver<S, F, R, E>(
+    session: &mut RatchetSession,
+    peer_id: &str,
+    envelope: &EncryptedEnvelope,
+    store: &S,
+    deliver_fn: F,
+) -> Result<R, RatchetError>
+where
+    S: DurableRatchetStore,
+    F: FnOnce(&[u8]) -> Result<R, E>,
+    E: std::fmt::Display,
+{
+    // 1. Decrypt
+    let plaintext = session.ratchet_decrypt(envelope)?;
+    // 2. Serialize state
+    let serialized = session.to_json()?;
+    // 3. Save durably
+    store
+        .save_durable(peer_id, &serialized)
+        .map_err(|e| RatchetError::DurableStorage(e.to_string()))?;
+    // 4. Deliver or display plaintext ONLY after durable write confirmed
+    deliver_fn(&plaintext).map_err(|e| RatchetError::NetworkDispatch(e.to_string()))
 }
 
 /// Top-level helper function matching libsignal-style API:

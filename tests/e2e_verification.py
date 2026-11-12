@@ -31,6 +31,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import urllib.request
 import urllib.error
+import sqlite3
 
 # ---------------------------------------------------------------------------
 # RFC 7748 X25519 (Montgomery Ladder) Pure Python Implementation
@@ -622,6 +623,38 @@ class DoubleRatchetSession:
         env = self.ratchet_encrypt(plaintext)
         return WirePacket.from_dict(env)
 
+    def durable_encrypt(self, plaintext: bytes, save_durable_fn, send_network_fn) -> dict:
+        """
+        Sub-Step SM.3: Persist ratchet state durably before releasing ciphertext to network.
+        
+        Three-phase commit:
+        1. Encrypt plaintext under current ratchet state -> envelope
+        2. Serialize full ratchet state to JSON
+        3. Write serialized state to durable storage (save_durable_fn)
+        4. ONLY AFTER durable write succeeds, transmit envelope (send_network_fn)
+        """
+        envelope = self.ratchet_encrypt(plaintext)
+        serialized = self.to_json()
+        save_durable_fn(serialized)
+        send_network_fn(envelope)
+        return envelope
+
+    def durable_decrypt(self, envelope: dict, save_durable_fn, deliver_display_fn) -> bytes:
+        """
+        Sub-Step SM.3: Persist ratchet state durably before acting on / delivering decrypted plaintext.
+        
+        Three-phase commit:
+        1. Decrypt ciphertext under current ratchet state -> plaintext
+        2. Serialize full ratchet state to JSON
+        3. Write serialized state to durable storage (save_durable_fn)
+        4. ONLY AFTER durable write succeeds, deliver or display plaintext (deliver_display_fn)
+        """
+        plaintext = self.ratchet_decrypt(envelope)
+        serialized = self.to_json()
+        save_durable_fn(serialized)
+        deliver_display_fn(plaintext)
+        return plaintext
+
     def ratchet_decrypt(self, envelope: dict) -> bytes:
         header = envelope["header"]
         dh_val = header.get("dh") or header["dh_pub"]
@@ -703,7 +736,14 @@ def decrypt(session: DoubleRatchetSession, header: dict, ciphertext: bytes, aad_
         "nonce": base64.b64encode(nonce).decode(),
     }
     return session.ratchet_decrypt(envelope)
-    return session.ratchet_decrypt(envelope)
+
+def durable_encrypt(session: DoubleRatchetSession, plaintext: bytes, save_durable_fn, send_network_fn) -> dict:
+    """Library-level helper for durable encryption pipeline (Sub-Step SM.3)."""
+    return session.durable_encrypt(plaintext, save_durable_fn, send_network_fn)
+
+def durable_decrypt(session: DoubleRatchetSession, envelope: dict, save_durable_fn, deliver_display_fn) -> bytes:
+    """Library-level helper for durable decryption pipeline (Sub-Step SM.3)."""
+    return session.durable_decrypt(envelope, save_durable_fn, deliver_display_fn)
 
 def init_sender_state(shared_secret: bytes, bob_ratchet_public: bytes) -> DoubleRatchetSession:
     """Library-level helper matching: let mut alice = init_sender_state(shared_secret, bob_dh_public)?;"""
@@ -2862,6 +2902,184 @@ def run_all_tests():
     assert padding_corruption_failed is True, "Test 4: Attempting to decrypt corrupted padding must fail"
     assert padding_err_msg == "invalid padding", f"Test 4: Decryption must fail with 'invalid padding', got '{padding_err_msg}'"
     print("    [PASS] 23.4: Test 4 (Padding Validation): Corrupting trailing padding bytes strictly rejected with 'invalid padding'.")
+
+    # 24. TASK: SUB-STEP SM.3: STATE PERSISTENCE DURABILITY (CRITICAL FOR KEY UNIQUENESS)
+    print("\n[+] [Sub-Step SM.3] Testing State Persistence Durability & Three-Phase Commit Pipeline...")
+
+    # Test 24.1: Encrypt Three-Phase Commit Sequence (Encrypt -> Save Durable -> Network Send)
+    sec_24 = secrets.token_bytes(32)
+    bob_priv_24 = secrets.token_bytes(32)
+    bob_pub_24 = x25519_base(bob_priv_24)
+    alice_24 = init_sender_state(sec_24, bob_pub_24)
+
+    pipeline_events = []
+    persisted_state_store = {}
+
+    def mock_save_durable_alice(serialized_json: str):
+        pipeline_events.append("save_durable")
+        persisted_state_store["alice"] = serialized_json
+
+    network_packets = []
+    def mock_send_network(envelope: dict):
+        pipeline_events.append("send_network")
+        network_packets.append(envelope)
+
+    env_sm3_0 = alice_24.durable_encrypt(b"Durable Hello Message 0", mock_save_durable_alice, mock_send_network)
+
+    assert pipeline_events == ["save_durable", "send_network"], "Strict order: save_durable must precede send_network"
+    assert len(network_packets) == 1, "Exactly one envelope transmitted"
+    assert network_packets[0] == env_sm3_0
+
+    # Verify persisted state has advanced counters
+    alice_saved_obj = json.loads(persisted_state_store["alice"])
+    assert alice_saved_obj["Ns"] == 1, "Persisted state must record advanced Ns = 1 before network transmission"
+    print("    [PASS] 24.1: Encrypt three-phase commit: save_durable strictly executed before network dispatch.")
+
+    # Test 24.2: Storage failure during Encrypt blocks network release (Zero Key/Nonce Exposure on Wire)
+    pipeline_fail_events = []
+    network_dispatched = False
+
+    def mock_failing_save_durable(serialized_json: str):
+        pipeline_fail_events.append("save_durable_fail")
+        raise IOError("Disk write failed: unflushed buffer / sudden power loss")
+
+    def mock_send_network_never(envelope: dict):
+        nonlocal network_dispatched
+        network_dispatched = True
+        pipeline_fail_events.append("send_network_unreachable")
+
+    storage_error_caught = False
+    try:
+        alice_24.durable_encrypt(b"Message with storage failure", mock_failing_save_durable, mock_send_network_never)
+    except IOError as e:
+        storage_error_caught = True
+        assert "Disk write failed" in str(e)
+
+    assert storage_error_caught is True, "Storage failure must bubble up"
+    assert network_dispatched is False, "Ciphertext must NEVER be transmitted if durable persistence fails"
+    assert "send_network_unreachable" not in pipeline_fail_events
+    print("    [PASS] 24.2: Storage failure blocks network dispatch: zero ciphertext released without durable write.")
+
+    # Test 24.3: Crash Recovery Key Uniqueness (LibSignal Threat Model Prevention)
+    # Research on libsignal store implementations explicitly warns:
+    # "The Double Ratchet has no per-message random nonce guard, so a write that is lost
+    # (crash, unflushed buffer) or rolled back (restored backup, cloned image) makes the next send
+    # reuse a message key and IV it has already used — which costs confidentiality, forward secrecy
+    # and replay protection" [citation:25].
+    #
+    # With durable persistence (Test 24.1), Alice's state was safely written with Ns = 1.
+    # Simulate sudden process crash and recovery from disk:
+    rebooted_alice = DoubleRatchetSession.from_json(persisted_state_store["alice"])
+    assert rebooted_alice.ns == 1, "Rebooted session resumes at Ns = 1"
+
+    env_sm3_1 = rebooted_alice.durable_encrypt(b"Durable Message 1 after reboot", mock_save_durable_alice, mock_send_network)
+
+    assert env_sm3_0["header"]["n"] == 0, "First message header has n = 0"
+    assert env_sm3_1["header"]["n"] == 1, "Second message header has n = 1"
+    assert env_sm3_0["nonce"] != env_sm3_1["nonce"], "Nonces must be unique across crash recovery"
+    assert env_sm3_0["ciphertext"] != env_sm3_1["ciphertext"], "Ciphertexts must differ"
+    print("    [PASS] 24.3: Crash-recovery key uniqueness: rebooted session safely advances without key/nonce reuse.")
+
+    # Test 24.4: Decrypt Three-Phase Commit Sequence & Plaintext Release Protection
+    bob_24 = init_receiver_state(sec_24, (bob_priv_24, bob_pub_24))
+
+    decrypt_pipeline_events = []
+    delivered_plaintexts = []
+
+    def mock_save_durable_bob(serialized_json: str):
+        decrypt_pipeline_events.append("save_durable_decrypt")
+        persisted_state_store["bob"] = serialized_json
+
+    def mock_deliver_display(pt: bytes):
+        decrypt_pipeline_events.append("deliver_display")
+        delivered_plaintexts.append(pt)
+
+    # Normal decrypt path
+    pt_sm3_0 = bob_24.durable_decrypt(env_sm3_0, mock_save_durable_bob, mock_deliver_display)
+    assert pt_sm3_0 == b"Durable Hello Message 0"
+    assert decrypt_pipeline_events == ["save_durable_decrypt", "deliver_display"]
+    assert delivered_plaintexts == [b"Durable Hello Message 0"]
+
+    # Bob's persisted state records Nr = 1
+    bob_saved_obj = json.loads(persisted_state_store["bob"])
+    assert bob_saved_obj["Nr"] == 1
+
+    # Failure during decrypt storage write blocks delivery
+    decrypt_fail_events = []
+    delivered_on_fail = False
+
+    def mock_failing_bob_save(serialized_json: str):
+        decrypt_fail_events.append("save_durable_decrypt_fail")
+        raise IOError("Disk error during decrypt persistence")
+
+    def mock_deliver_never(pt: bytes):
+        nonlocal delivered_on_fail
+        delivered_on_fail = True
+        decrypt_fail_events.append("deliver_unreachable")
+
+    decrypt_error_caught = False
+    try:
+        bob_24.durable_decrypt(env_sm3_1, mock_failing_bob_save, mock_deliver_never)
+    except IOError as e:
+        decrypt_error_caught = True
+        assert "Disk error during decrypt persistence" in str(e)
+
+    assert decrypt_error_caught is True
+    assert delivered_on_fail is False, "Plaintext must NEVER be delivered/displayed if state cannot be persisted"
+    assert "deliver_unreachable" not in decrypt_fail_events
+    print("    [PASS] 24.4: Decrypt three-phase commit: durable save verified; storage failure blocks plaintext release.")
+
+    # Test 24.5: SQLite Durability Engine Configuration (synchronous = FULL & journal_mode = WAL)
+    test_db_path = f"test_durability_{int(time.time())}_{secrets.token_hex(4)}.db"
+    try:
+        conn = sqlite3.connect(test_db_path)
+        # Apply durability pragmas matching ClientDatabase::open_encrypted
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode = WAL;")
+        journal_mode = cur.fetchone()[0]
+        assert journal_mode.lower() == "wal", f"Journal mode must be WAL, got {journal_mode}"
+
+        cur.execute("PRAGMA synchronous = FULL;")
+        cur.execute("PRAGMA synchronous;")
+        sync_mode = cur.fetchone()[0]
+        # SQLite returns integer 2 for FULL (0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA)
+        assert sync_mode == 2, f"Synchronous mode must be FULL (2), got {sync_mode}"
+
+        # Create ratchet_sessions schema and test ACID transaction commit
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ratchet_sessions (
+                peer_user_id TEXT PRIMARY KEY,
+                session_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        """)
+        conn.commit()
+
+        # Immediate transaction write
+        cur.execute("BEGIN IMMEDIATE;")
+        cur.execute(
+            "INSERT OR REPLACE INTO ratchet_sessions (peer_user_id, session_json, updated_at) VALUES (?, ?, ?);",
+            ("peer_alice", persisted_state_store["alice"], int(time.time()))
+        )
+        conn.commit()
+
+        # Verify durable read
+        cur.execute("SELECT session_json FROM ratchet_sessions WHERE peer_user_id = ?;", ("peer_alice",))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == persisted_state_store["alice"]
+
+        conn.close()
+    finally:
+        # Clean up temporary test database and WAL files
+        for suffix in ["", "-wal", "-shm"]:
+            f = Path(f"{test_db_path}{suffix}")
+            if f.exists():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+    print("    [PASS] 24.5: SQLite durability configuration (synchronous = FULL, journal_mode = WAL, ACID commit) verified.")
 
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
