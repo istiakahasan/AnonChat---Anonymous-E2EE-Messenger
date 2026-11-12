@@ -13,6 +13,7 @@
       --accent: #00d2b4;
       --danger-bg: #b71c1c;
       --warning-border: #ff9800;
+      --warning-bg: rgba(230, 81, 0, 0.15);
     }
     body {
       margin: 0;
@@ -59,8 +60,13 @@
       cursor: pointer;
       font-size: 14px;
     }
-    button:hover {
+    button:hover:not(:disabled) {
       opacity: 0.9;
+    }
+    button:disabled {
+      background-color: #37474f;
+      color: #78909c;
+      cursor: not-allowed;
     }
     input, textarea {
       width: 100%;
@@ -74,6 +80,11 @@
       margin-bottom: 12px;
       font-family: monospace;
     }
+    input:disabled {
+      background-color: #3e2723;
+      color: #ff8a80;
+      border-color: #d32f2f;
+    }
     pre {
       background-color: #0a0a0a;
       padding: 12px;
@@ -83,14 +94,84 @@
       color: #80cbc4;
     }
     .safety-code {
-      font-size: 18px;
+      font-size: 17px;
       font-family: monospace;
       color: #ffb74d;
-      letter-spacing: 2px;
+      letter-spacing: 1.5px;
       background: #111;
-      padding: 10px;
+      padding: 12px;
       border-radius: 6px;
       text-align: center;
+      border: 1px solid #333;
+    }
+    /* Persistent Red Mismatch Banner */
+    .mismatch-banner {
+      display: none;
+      background-color: #b71c1c;
+      border: 1px solid #ff5252;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+    .mismatch-header {
+      color: #fff;
+      font-weight: bold;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    .mismatch-desc {
+      color: #ffcdd2;
+      font-size: 12px;
+      line-height: 1.4;
+      margin-bottom: 10px;
+    }
+    /* Persistent System Warning Bubble in Chat */
+    .system-warning-bubble {
+      display: none;
+      background-color: var(--warning-bg);
+      border: 1.5px solid var(--warning-border);
+      border-radius: 8px;
+      padding: 12px;
+      margin: 12px 0;
+      cursor: pointer;
+    }
+    .system-warning-title {
+      color: #ffb74d;
+      font-weight: bold;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .system-warning-text {
+      color: #fff3e0;
+      font-size: 13px;
+      line-height: 1.4;
+      margin-bottom: 6px;
+    }
+    .system-warning-action {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: bold;
+    }
+    /* Modal Dialog */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+    .modal-card {
+      background: #1e1e1e;
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 440px;
+      width: 90%;
+      border: 2px solid var(--warning-border);
     }
   </style>
 </head>
@@ -107,7 +188,7 @@
 
     <h1>🔒 AnonChat Web (@getmaapp/signal-wasm)</h1>
     <p style="color: var(--text-muted)">
-      Browser WebAssembly implementation using Web Crypto API for CSPRNG randomness and Encrypted IndexedDB (AES-256-GCM) for state persistence.
+      Browser WebAssembly implementation using Web Crypto API for CSPRNG randomness, Encrypted IndexedDB (AES-256-GCM) for state persistence, and Safety Number key change detection.
     </p>
 
     <!-- Initialization Section -->
@@ -125,21 +206,43 @@
       <pre id="keys-output">// PreKeyBundle output will appear here...</pre>
     </div>
 
-    <!-- Encryption / Decryption Playground -->
+    <!-- Encrypted Messaging & Safety Number Section -->
     <div class="card">
-      <h2>3. Encrypt / Decrypt & Safety Numbers</h2>
-      <label>Plaintext Message:</label>
+      <h2>3. Encrypted Messaging & Identity Key Change Lockdown</h2>
+
+      <!-- Persistent Red Mismatch Banner -->
+      <div id="mismatch-banner" class="mismatch-banner">
+        <div class="mismatch-header">⚠️ SAFETY NUMBER MISMATCH DETECTED</div>
+        <div class="mismatch-desc">The Safety Number scanned does not match user-bob's key on file. Transmission is blocked.</div>
+        <button id="btn-dismiss-mismatch" style="background: rgba(0,0,0,0.4); color: #fff; padding: 6px 12px; font-size: 12px;">Dismiss Warning</button>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <span style="font-size: 14px; color: var(--accent); font-weight: bold;">Peer: user-bob (Device 1)</span>
+        <button id="btn-simulate-keychange" style="background: #e65100; color: #fff; padding: 6px 12px; font-size: 12px;">⚡ Simulate Identity Key Change</button>
+      </div>
+
+      <!-- Persistent Non-Dismissable System Warning Message in Chat -->
+      <div id="system-warning-bubble" class="system-warning-bubble">
+        <div class="system-warning-title">⚠️ SECURITY CODE CHANGED</div>
+        <div id="system-warning-text" class="system-warning-text">
+          ⚠️ user-bob's security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.
+        </div>
+        <div class="system-warning-action">Tap to verify or resolve →</div>
+      </div>
+
+      <label>Encrypted Message Input:</label>
       <input id="input-msg" type="text" value="Hello from browser WebAssembly Signal Protocol!" />
-      <button id="btn-test-cipher" disabled>Simulate Local Session & Encrypt</button>
+      <button id="btn-test-cipher" disabled>Send Encrypted Message 🚀</button>
 
       <div style="margin-top: 16px;">
-        <label>Ciphertext Result:</label>
+        <label>Ciphertext Result (Sealed Envelope):</label>
         <pre id="cipher-output">// Ciphertext will appear here...</pre>
       </div>
 
       <div style="margin-top: 16px;">
-        <label>Safety Number (Fingerprint):</label>
-        <div id="safety-number-box" class="safety-code">---- ---- ---- ----</div>
+        <label>60-Digit Composite Safety Number (12 groups of 5 digits):</label>
+        <div id="safety-number-box" class="safety-code">58514 34043 94056 44585 48893 32257 82277 01943 81263 81849 42018 21380</div>
       </div>
     </div>
 
@@ -155,7 +258,23 @@
     </div>
   </div>
 
+  <!-- Key Change Resolution Modal -->
+  <div id="keychange-modal" class="modal-overlay">
+    <div class="modal-card">
+      <h3 style="color: #ff9800; margin-top: 0;">⚠️ Security Code Changed</h3>
+      <p style="font-size: 13px; line-height: 1.4; color: #e0e0e0;">
+        The cryptographic identity for <strong>user-bob</strong> has changed.<br><br>
+        This could mean they reinstalled the app, or someone is intercepting your messages (Man-in-the-Middle attack).<br><br>
+        Outbound messaging is <strong>LOCKED</strong> until resolved.
+      </p>
+      <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 16px;">
+        <button id="btn-modal-verify" style="background: var(--accent); color: #000;">✓ Verify Again (Safety Number Match)</button>
+        <button id="btn-modal-accept" style="background: rgba(255,82,82,0.2); color: #ff5252; border: 1px solid #ff5252;">⚠️ Accept New Key (Without Verification)</button>
+        <button id="btn-modal-cancel" style="background: #2a2a2a; color: #888;">Keep Blocked (Cancel)</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
-

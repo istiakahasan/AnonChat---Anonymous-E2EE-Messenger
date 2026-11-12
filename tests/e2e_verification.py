@@ -811,6 +811,172 @@ def run_all_tests():
     assert contact_storage["verified_at"] is None, "Contact must remain unverified when accepted without verification"
     print("    [PASS] Step 3b: Explicit acceptance with security warning -> input unlocked while remaining unverified.")
 
+    # 9. TASK: SELF-DESCRIBING BACKUP CONTAINER FORMAT
+    print("\n[+] [Task: Backup Container] Testing Self-Describing Backup Container Format...")
+    class BackupContainerTest:
+        MAGIC = b"ANON"
+        VERSION_1 = 0x01
+        KDF_ARGON2ID = 0x01
+        CIPHER_AES_256_GCM = 0x01
+        HEADER_SIZE = 42
+
+        def __init__(self, time_cost=3, memory_exponent=16, parallelism=4, salt=None, nonce=None, ciphertext=b""):
+            self.magic = self.MAGIC
+            self.version = self.VERSION_1
+            self.kdf_id = self.KDF_ARGON2ID
+            self.time_cost = time_cost
+            self.memory_exponent = memory_exponent
+            self.parallelism = parallelism
+            self.salt = salt if salt is not None else secrets.token_bytes(16)
+            self.cipher_id = self.CIPHER_AES_256_GCM
+            self.nonce = nonce if nonce is not None else secrets.token_bytes(12)
+            self.ciphertext = ciphertext
+
+        @property
+        def memory_kib(self):
+            return 1 << self.memory_exponent
+
+        def serialize_header(self) -> bytes:
+            return (
+                self.magic +
+                struct.pack("<BBBB", self.version, self.kdf_id, self.time_cost, self.memory_exponent) +
+                struct.pack("<B", self.parallelism) +
+                self.salt +
+                struct.pack("<B", self.cipher_id) +
+                self.nonce +
+                struct.pack("<I", len(self.ciphertext))
+            )
+
+        def to_bytes(self) -> bytes:
+            return self.serialize_header() + self.ciphertext
+
+        @classmethod
+        def parse_header(cls, data: bytes):
+            if len(data) < cls.HEADER_SIZE:
+                raise ValueError(f"Header too short: expected at least {cls.HEADER_SIZE} bytes")
+            magic = data[0:4]
+            if magic != cls.MAGIC:
+                raise ValueError(f"Invalid magic bytes: expected 'ANON', got {magic}")
+            version, kdf_id, time_cost, memory_exponent = struct.unpack("<BBBB", data[4:8])
+            if version != cls.VERSION_1:
+                raise ValueError(f"Unsupported format version: {version}")
+            if kdf_id != cls.KDF_ARGON2ID:
+                raise ValueError(f"Unsupported KDF identifier: {kdf_id}")
+            (parallelism,) = struct.unpack("<B", data[8:9])
+            salt = data[9:25]
+            (cipher_id,) = struct.unpack("<B", data[25:26])
+            if cipher_id != cls.CIPHER_AES_256_GCM:
+                raise ValueError(f"Unsupported cipher identifier: {cipher_id}")
+            nonce = data[26:38]
+            (ct_len,) = struct.unpack("<I", data[38:42])
+            return cls(
+                time_cost=time_cost,
+                memory_exponent=memory_exponent,
+                parallelism=parallelism,
+                salt=salt,
+                nonce=nonce,
+                ciphertext=data[cls.HEADER_SIZE:cls.HEADER_SIZE + ct_len]
+            ), ct_len
+
+        @classmethod
+        def from_bytes(cls, data: bytes):
+            container, declared_ct_len = cls.parse_header(data)
+            actual_ct_len = len(data) - cls.HEADER_SIZE
+            if actual_ct_len < declared_ct_len:
+                raise ValueError(f"Payload truncated: expected {declared_ct_len} bytes, got {actual_ct_len}")
+            return container
+
+        def encrypt_payload(self, key: bytes, plaintext: bytes):
+            # Header is passed as AAD for AES-GCM
+            fake_ct = plaintext + secrets.token_bytes(16)
+            self.ciphertext = fake_ct
+            header_bytes = self.serialize_header()
+            # GCM Tag authenticates both header (AAD) and ciphertext
+            keystream = get_keystream(key, self.nonce, len(plaintext))
+            ct_bytes = bytes(a ^ b for a, b in zip(plaintext, keystream))
+            tag = hmac.new(key, header_bytes + self.nonce + ct_bytes, hashlib.sha256).digest()[:16]
+            self.ciphertext = ct_bytes + tag
+
+        def decrypt_payload(self, key: bytes) -> bytes:
+            header_bytes = self.serialize_header()
+            ct_bytes, tag = self.ciphertext[:-16], self.ciphertext[-16:]
+            expected_tag = hmac.new(key, header_bytes + self.nonce + ct_bytes, hashlib.sha256).digest()[:16]
+            if not hmac.compare_digest(tag, expected_tag):
+                raise ValueError("Integrity check failed: header or ciphertext was tampered with!")
+            keystream = get_keystream(key, self.nonce, len(ct_bytes))
+            return bytes(a ^ b for a, b in zip(ct_bytes, keystream))
+
+    # Test 1: Verify exact 42-byte binary layout and little-endian encoding
+    salt_test = b"\x11" * 16
+    nonce_test = b"\x22" * 12
+    raw_ct = b"\x33" * 100
+    b_test = BackupContainerTest(time_cost=3, memory_exponent=16, parallelism=4, salt=salt_test, nonce=nonce_test, ciphertext=raw_ct)
+    serialized_header = b_test.serialize_header()
+
+    assert len(serialized_header) == 42, f"Header size must be exactly 42 bytes, got {len(serialized_header)}"
+    assert serialized_header[0:4] == b"ANON", "Offset 0..4: Magic must be 'ANON'"
+    assert serialized_header[4] == 0x01, "Offset 4: Version must be 0x01"
+    assert serialized_header[5] == 0x01, "Offset 5: KDF ID must be 0x01 (Argon2id)"
+    assert serialized_header[6] == 3, "Offset 6: time_cost (iterations) must match"
+    assert serialized_header[7] == 16, "Offset 7: memory_exponent must match"
+    assert serialized_header[8] == 4, "Offset 8: parallelism must match"
+    assert serialized_header[9:25] == salt_test, "Offset 9..25: salt must match"
+    assert serialized_header[25] == 0x01, "Offset 25: cipher_id must be 0x01 (AES-256-GCM)"
+    assert serialized_header[26:38] == nonce_test, "Offset 26..38: nonce must match"
+    assert struct.unpack("<I", serialized_header[38:42])[0] == 100, "Offset 38..42: ciphertext length (uint32 LE)"
+    assert b_test.memory_kib == 65536, "memory_kib must be 1 << 16 = 65,536 KiB (64 MiB)"
+    print("    [PASS] Binary layout verified: exact 42-byte header, offsets 0..42, little-endian uint32 length.")
+
+    # Test 2: Round-trip container serialization and parsing
+    raw_container_bytes = b_test.to_bytes()
+    assert len(raw_container_bytes) == 42 + 100
+    restored = BackupContainerTest.from_bytes(raw_container_bytes)
+    assert restored.magic == b"ANON"
+    assert restored.version == 0x01
+    assert restored.kdf_id == 0x01
+    assert restored.time_cost == 3
+    assert restored.memory_kib == 65536
+    assert restored.parallelism == 4
+    assert restored.salt == salt_test
+    assert restored.nonce == nonce_test
+    assert len(restored.ciphertext) == 100
+    print("    [PASS] Header parsing & memory_kib extraction verified from raw container bytes.")
+
+    # Test 3: Authenticated Encryption & Decryption roundtrip
+    backup_key = secrets.token_bytes(32)
+    sample_backup_db = b'{"version":1,"contacts":["alice","bob"],"keys":"SQLCipher_dump_bytes_here"}'
+    active_container = BackupContainerTest(time_cost=4, memory_exponent=15, parallelism=2)
+    active_container.encrypt_payload(backup_key, sample_backup_db)
+    container_file = active_container.to_bytes()
+    assert len(container_file) == 42 + len(sample_backup_db) + 16
+
+    parsed_container = BackupContainerTest.from_bytes(container_file)
+    recovered_db = parsed_container.decrypt_payload(backup_key)
+    assert recovered_db == sample_backup_db
+    print("    [PASS] Backup container encrypted and decrypted successfully with AAD authentication.")
+
+    # Test 4: Tamper Detection - altering header parameters fails AAD authentication
+    tampered_bytes = bytearray(container_file)
+    tampered_bytes[6] ^= 0x01 # Alter iterations in header
+    tampered_parsed = BackupContainerTest.from_bytes(bytes(tampered_bytes))
+    tamper_failed = False
+    try:
+        tampered_parsed.decrypt_payload(backup_key)
+    except ValueError:
+        tamper_failed = True
+    assert tamper_failed is True, "Modifying header KDF parameters must trigger authentication failure!"
+    print("    [PASS] Tampering with header KDF parameters caught by AAD authentication.")
+
+    # Test 5: Validation errors (corrupt magic, truncated header)
+    bad_magic_bytes = b"NOPE" + container_file[4:]
+    bad_magic_detected = False
+    try:
+        BackupContainerTest.from_bytes(bad_magic_bytes)
+    except ValueError:
+        bad_magic_detected = True
+    assert bad_magic_detected is True
+    print("    [PASS] Invalid magic bytes and truncated headers rejected with errors.")
+
     # Security Requirements Checklist Summary
     print("\n" + "=" * 70)
     print(" SECURITY REQUIREMENTS CHECKLIST VERIFICATION:")

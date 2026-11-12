@@ -62,3 +62,30 @@
 | **Zero-Knowledge Ephemeral Queue** | **Yes** | Server holds queue | Cloud store | Onion routing | Ephemeral queues |
 | **Disappearing Messages (Local TTL)** | **Yes** | Yes | Secret chats only | Yes | Yes |
 
+---
+
+## 5. Self-Describing Backup Container Format
+
+### 5.1 Rationale: Why a Self-Describing Header Is Mandatory
+A naive format of `[salt][nonce][ciphertext]` fails silently when KDF (Argon2id) parameters are tuned or evolved in the future. The application of the future cannot decrypt the backup of the past because parameters were hardcoded in application logic, not preserved with the backup blob. Because the relay server acts as a blind store and cannot assist, the backup file must carry self-describing metadata needed for deterministic recovery.
+
+### 5.2 Binary Layout (42-Byte Little-Endian Header + Authenticated Ciphertext)
+
+| Offset | Size (Bytes) | Field | Value / Representation | Description |
+| :---: | :---: | :--- | :--- | :--- |
+| **0** | 4 | Magic Bytes | `"ANON"` (`0x41 0x4E 0x4F 0x4E`) | File type identification |
+| **4** | 1 | Format Version | `0x01` (`uint8`) | Container structure version |
+| **5** | 1 | KDF Identifier | `0x01` (`uint8`) | `0x01` = Argon2id |
+| **6** | 1 | Argon2 Time Cost | `uint8` | Number of iterations (e.g., 3) |
+| **7** | 1 | Argon2 Memory Exponent | `uint8` | $\text{Memory (KiB)} = 1 \ll \text{exponent}$ (e.g. 16 $\rightarrow$ 64 MiB) |
+| **8** | 1 | Argon2 Parallelism | `uint8` | Number of execution lanes (e.g., 4) |
+| **9** | 16 | Salt | 16 raw bytes | Random cryptographically secure salt |
+| **25** | 1 | Cipher Identifier | `0x01` (`uint8`) | `0x01` = AES-256-GCM |
+| **26** | 12 | Nonce / IV | 12 raw bytes | Random 96-bit AES-GCM IV |
+| **38** | 4 | Ciphertext Length ($N$) | `uint32` (Little-Endian) | Length of ciphertext in bytes |
+| **42** | $N$ | Ciphertext + Auth Tag | $N$ raw bytes | AES-256-GCM payload; final 16 bytes are the GCM authentication tag |
+
+### 5.3 Cryptographic Integrity (AAD Binding)
+The entire 42-byte header (offsets 0 through 41) is passed as **Additional Authenticated Data (AAD)** to AES-256-GCM during encryption and decryption. Any tampering with KDF parameters, format version, salt, nonce, or payload length causes tag verification to fail immediately with an integrity check error.
+
+
