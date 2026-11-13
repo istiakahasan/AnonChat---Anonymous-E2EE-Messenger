@@ -22,4 +22,5 @@ tracing = "0.1"
 rusqlite.workspace = true
 secrecy.workspace = true
 rand.workspace = true
+x25519-dalek.workspace = true
 

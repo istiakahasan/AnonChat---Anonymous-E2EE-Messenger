@@ -876,9 +876,17 @@ mod tests {
 
         // Test monotonic sequence rejection
         assert_eq!(
+            validate_passphrase("abcdefghijkl"),
+            Err(BackupContainerError::WeakPassphrase(
+                "Passphrase is a simple sequential pattern".into()
+            ))
+        );
+
+        // Single-category passphrase (digits only, not monotonic since 9 wraps to 0)
+        assert_eq!(
             validate_passphrase("123456789012"),
             Err(BackupContainerError::WeakPassphrase(
-                "Passphrase lacks diversity (at least 5 unique characters required)".into()
+                "Passphrase must contain at least 2 character categories (letters, digits, or symbols)".into()
             ))
         );
 

@@ -24,6 +24,30 @@ jobs:
       - name: Run Interactive Demo Verification
         run: python scripts/demo_chat.py
 
+  rust-build-and-test:
+    name: Rust Build & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (SQLCipher / OpenSSL)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build relay, crypto and client crates
+        run: cargo build --locked -p anonchat-crypto -p anonchat-server -p anonchat-client
+
+      - name: Run unit tests
+        run: cargo test --locked -p anonchat-crypto -p anonchat-server -p anonchat-client
+
+      - name: Type-check desktop UI
+        run: cargo check --locked -p anonchat-ui
+
   lint-expo-client:
     name: Expo / React Native TypeScript Typecheck
     runs-on: ubuntu-latest

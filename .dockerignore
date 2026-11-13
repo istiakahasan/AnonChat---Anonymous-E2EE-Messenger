@@ -1,0 +1,5 @@
+target/
+.git/
+android/
+expo-client/node_modules/
+**/node_modules/

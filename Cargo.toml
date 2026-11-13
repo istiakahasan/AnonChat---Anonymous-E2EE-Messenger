@@ -20,7 +20,9 @@ x25519-dalek = { version = "2.0", features = ["static_secrets", "serde"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
+async-trait = "0.1"
 subtle = "2.5"
 rand = "0.8"
 rand_core = { version = "0.6", features = ["std"] }
@@ -30,6 +32,7 @@ secrecy = { version = "0.8", features = ["serde"] }
 # Serialization & Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde-big-array = "0.5"
 base64 = "0.22"
 hex = "0.4"
 thiserror = "1.0"
@@ -46,13 +49,11 @@ tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors"] }
 
 # Database
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "sqlite", "chrono", "uuid"] }
-rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
+rusqlite = { version = "0.30", features = ["bundled-sqlcipher"] }
 
-# UI & Tor
+# UI
 eframe = "0.27"
 egui = "0.27"
 qrcode = "0.14"
-arti-client = { version = "0.15", optional = true }
-tor-rtcompat = { version = "0.15", optional = true }
 

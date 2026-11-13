@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use axum::{
     extract::DefaultBodyLimit,
-    middleware,
+    middleware as axum_middleware,
     routing::{get, post},
     Router,
 };
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/backup", post(upload_backup))
         .route("/v1/backup/:userId", get(get_backup))
         .layer(DefaultBodyLimit::max(MAX_BACKUP_BLOB_SIZE))
-        .layer(middleware::from_fn(zero_logging_middleware))
+        .layer(axum_middleware::from_fn(zero_logging_middleware))
         .with_state(state);
 
     let port: u16 = env::var("PORT")

@@ -323,6 +323,30 @@ pub struct SerializedIdentityState {
     pub signed_prekey_id: u32,
     pub signed_prekey_private_bytes: [u8; 32],
     #[zeroize(skip)]
+    #[serde(with = "serde_big_array::BigArray")]
     pub signed_prekey_signature_bytes: [u8; 64],
     pub one_time_prekeys: Vec<SerializedOneTimePreKey>,
+}
+
+// Redacted Debug impls: these types hold raw private key bytes, so they must
+// never print them (security checklist: keys are never logged).
+impl fmt::Debug for SerializedOneTimePreKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SerializedOneTimePreKey")
+            .field("id", &self.id)
+            .field("private_key_bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Debug for SerializedIdentityState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SerializedIdentityState")
+            .field("identity_private_bytes", &"[REDACTED]")
+            .field("identity_dh_private_bytes", &"[REDACTED]")
+            .field("signed_prekey_id", &self.signed_prekey_id)
+            .field("signed_prekey_private_bytes", &"[REDACTED]")
+            .field("one_time_prekeys", &format_args!("[{} redacted]", self.one_time_prekeys.len()))
+            .finish()
+    }
 }

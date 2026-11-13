@@ -139,3 +139,49 @@ pub fn derive_safety_number(
     formatted_groups.join(" ")
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_safety_number_symmetric_and_formatted() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+        let ab = derive_safety_number(&a, "alice", &b, "bob");
+        let ba = derive_safety_number(&b, "bob", &a, "alice");
+        assert_eq!(ab, ba, "Alice and Bob must compute the identical safety number");
+        let groups: Vec<&str> = ab.split(' ').collect();
+        assert_eq!(groups.len(), 12);
+        assert!(groups.iter().all(|g| g.len() == 5 && g.chars().all(|c| c.is_ascii_digit())));
+    }
+
+    #[test]
+    fn test_key_change_resets_verification() {
+        let mut state = ContactVerificationState::new("bob", "11111 22222", "aa");
+        state.mark_verified();
+        assert!(state.verified_at.is_some());
+
+        // Same key: still trusted
+        assert!(state.check_key_update("aa", "11111 22222"));
+        assert!(state.verified_at.is_some());
+
+        // Changed key: reported, trust reset, new key/number recorded
+        assert!(!state.check_key_update("bb", "33333 44444"));
+        assert!(state.verified_at.is_none());
+        assert_eq!(state.last_remote_key_hex, "bb");
+        assert_eq!(state.safety_number, "33333 44444");
+    }
+
+    #[test]
+    fn test_accept_new_key_without_verification_stays_unverified() {
+        let mut state = ContactVerificationState::new("bob", "11111 22222", "aa");
+        state.mark_verified();
+        state.accept_new_key_without_verification("cc", "55555 66666");
+        assert!(state.verified_at.is_none(), "accepting unverified must never mark verified");
+        assert_eq!(state.last_remote_key_hex, "cc");
+        assert_eq!(state.safety_number, "55555 66666");
+        // The accepted key is now the trusted baseline, so no repeated change alert
+        assert!(state.check_key_update("cc", "55555 66666"));
+    }
+}
