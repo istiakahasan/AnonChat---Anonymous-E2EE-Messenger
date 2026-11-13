@@ -40,13 +40,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build relay, crypto and client crates
-        run: cargo build --locked -p anonchat-crypto -p anonchat-server -p anonchat-client
+        run: |
+          cargo build --locked -p anonchat-crypto -p anonchat-server -p anonchat-client 2>&1 | tee cargo_build.log || (echo "### Cargo Build Failure Log" >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && tail -n 150 cargo_build.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
 
       - name: Run unit tests
-        run: cargo test --locked -p anonchat-crypto -p anonchat-server -p anonchat-client
+        run: |
+          cargo test --locked -p anonchat-crypto -p anonchat-server -p anonchat-client 2>&1 | tee cargo_test.log || (echo "### Cargo Test Failure Log" >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && tail -n 150 cargo_test.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
 
       - name: Type-check desktop UI
-        run: cargo check --locked -p anonchat-ui
+        run: |
+          cargo check --locked -p anonchat-ui 2>&1 | tee cargo_check.log || (echo "### Cargo Check Failure Log" >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && tail -n 150 cargo_check.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
 
   lint-expo-client:
     name: Expo / React Native TypeScript Typecheck
