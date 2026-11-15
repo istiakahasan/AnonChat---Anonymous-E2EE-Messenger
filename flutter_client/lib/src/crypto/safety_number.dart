@@ -11,11 +11,17 @@ class ContactVerificationRecord {
   final int? verifiedAt;
   final String lastRemoteKeyHex;
 
+  /// True from the moment an identity key change is detected until the user either
+  /// re-verifies the contact or explicitly accepts the new key. Persisted so the
+  /// "sending blocked" lock and warning survive leaving the chat or restarting the app.
+  final bool keyChangePending;
+
   ContactVerificationRecord({
     required this.contactId,
     required this.safetyNumber,
     this.verifiedAt,
     required this.lastRemoteKeyHex,
+    this.keyChangePending = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -23,6 +29,7 @@ class ContactVerificationRecord {
         'safetyNumber': safetyNumber,
         'verifiedAt': verifiedAt,
         'lastRemoteKeyHex': lastRemoteKeyHex,
+        'keyChangePending': keyChangePending,
       };
 
   factory ContactVerificationRecord.fromJson(Map<String, dynamic> json) =>
@@ -31,6 +38,7 @@ class ContactVerificationRecord {
         safetyNumber: json['safetyNumber'] as String,
         verifiedAt: json['verifiedAt'] as int?,
         lastRemoteKeyHex: json['lastRemoteKeyHex'] as String,
+        keyChangePending: json['keyChangePending'] as bool? ?? false,
       );
 }
 
@@ -152,6 +160,7 @@ class SafetyNumberService {
         safetyNumber: currentSafetyNumber,
         verifiedAt: null, // Reset trust!
         lastRemoteKeyHex: remoteKeyHex,
+        keyChangePending: true,
       );
       await saveVerificationState(updated);
       return {
@@ -176,6 +185,7 @@ class SafetyNumberService {
         safetyNumber: existing.safetyNumber,
         verifiedAt: DateTime.now().millisecondsSinceEpoch,
         lastRemoteKeyHex: existing.lastRemoteKeyHex,
+        keyChangePending: false,
       );
       await saveVerificationState(updated);
     }
@@ -190,8 +200,32 @@ class SafetyNumberService {
         safetyNumber: existing.safetyNumber,
         verifiedAt: null, // Reset verification
         lastRemoteKeyHex: newRemoteKeyHex ?? existing.lastRemoteKeyHex,
+        keyChangePending: true, // Persist the lock across chat reopen / app restart
       );
       await saveVerificationState(updated);
+    } else {
+      // No prior record: still persist the pending lock so it cannot be bypassed by reopening the chat.
+      await saveVerificationState(ContactVerificationRecord(
+        contactId: contactId,
+        safetyNumber: '',
+        verifiedAt: null,
+        lastRemoteKeyHex: newRemoteKeyHex ?? '',
+        keyChangePending: true,
+      ));
+    }
+  }
+
+  /// Clears the persisted key-change lock (used when the user resolves the warning).
+  static Future<void> clearKeyChangePending(String contactId) async {
+    final existing = await getVerificationState(contactId);
+    if (existing != null && existing.keyChangePending) {
+      await saveVerificationState(ContactVerificationRecord(
+        contactId: existing.contactId,
+        safetyNumber: existing.safetyNumber,
+        verifiedAt: existing.verifiedAt,
+        lastRemoteKeyHex: existing.lastRemoteKeyHex,
+        keyChangePending: false,
+      ));
     }
   }
 
@@ -207,6 +241,7 @@ class SafetyNumberService {
       safetyNumber: newSafetyNumber ?? existing?.safetyNumber ?? '',
       verifiedAt: null, // Remains unverified
       lastRemoteKeyHex: newRemoteKeyHex,
+      keyChangePending: false,
     );
     await saveVerificationState(updated);
   }
