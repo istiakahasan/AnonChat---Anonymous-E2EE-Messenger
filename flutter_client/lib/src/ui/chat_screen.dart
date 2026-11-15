@@ -84,8 +84,33 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
       if (state != null && state.verifiedAt != null) {
         setState(() => _isVerified = true);
       }
+      if (state != null && state.keyChangePending && mounted) {
+        // The key change was never resolved: restore the lock and the persistent warning
+        // so reopening the chat (or restarting the app) cannot silently re-enable sending.
+        final warningText = _keyChangeWarningText();
+        setState(() {
+          _hasKeyChangeLock = true;
+          _pendingNewKeyHex =
+              state.lastRemoteKeyHex.isEmpty ? null : state.lastRemoteKeyHex;
+          if (!_messages.any((m) => m.isSystemWarning && m.text == warningText)) {
+            _messages.add(
+              ChatMessage(
+                id: 'keychange_restored_${DateTime.now().millisecondsSinceEpoch}',
+                sender: 'System',
+                text: warningText,
+                isMine: false,
+                isSystemWarning: true,
+                timestamp: DateTime.now(),
+              ),
+            );
+          }
+        });
+      }
     } catch (_) {}
   }
+
+  String _keyChangeWarningText() =>
+      "⚠️ ${widget.contactName}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.";
 
   Future<void> _bootstrap() async {
     try {
@@ -123,13 +148,17 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
     // 1. Set verifiedAt = null in local storage
     await SafetyNumberService.resetVerification(widget.contactName, newKeyHex);
 
-    final warningText =
-        "⚠️ ${widget.contactName}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.";
+    final warningText = _keyChangeWarningText();
+
+    // Never invent a key: fall back to what is stored (null if nothing is known).
+    final storedKey =
+        (await SafetyNumberService.getVerificationState(widget.contactName))?.lastRemoteKeyHex;
+    final resolvedKey = newKeyHex ?? ((storedKey == null || storedKey.isEmpty) ? null : storedKey);
 
     setState(() {
       _isVerified = false;
       _hasKeyChangeLock = true;
-      _pendingNewKeyHex = newKeyHex ?? 'F9E8D7C6B5A43210F9E8D7C6B5A43210F9E8D7C6B5A43210F9E8D7C6B5A43210';
+      _pendingNewKeyHex = resolvedKey;
 
       // 2. Insert persistent system message into chat
       if (!_messages.any((m) => m.isSystemWarning && m.text == warningText)) {
@@ -383,6 +412,8 @@ class _FlutterChatScreenState extends State<FlutterChatScreen> {
                   widget.contactName,
                   _pendingNewKeyHex!,
                 );
+              } else {
+                await SafetyNumberService.clearKeyChangePending(widget.contactName);
               }
               Navigator.pop(ctx);
               setState(() {

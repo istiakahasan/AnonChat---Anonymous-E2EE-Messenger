@@ -26,7 +26,13 @@ object SafetyNumber {
         val contactId: String,
         val safetyNumber: String,
         val verifiedAt: Long?,
-        val lastRemoteKeyHex: String
+        val lastRemoteKeyHex: String,
+        /**
+         * True from the moment an identity key change is detected until the user either
+         * re-verifies the contact or explicitly accepts the new key. Must be persisted with the
+         * record so the "sending blocked" lock survives leaving the chat or restarting the app.
+         */
+        val keyChangePending: Boolean = false
     )
 
     /**
@@ -100,7 +106,8 @@ object SafetyNumber {
     fun resetVerification(storedState: VerificationState, newKeyHex: String? = null): VerificationState {
         return storedState.copy(
             verifiedAt = null,
-            lastRemoteKeyHex = newKeyHex ?: storedState.lastRemoteKeyHex
+            lastRemoteKeyHex = newKeyHex ?: storedState.lastRemoteKeyHex,
+            keyChangePending = true
         )
     }
 
@@ -112,7 +119,8 @@ object SafetyNumber {
             contactId = contactId,
             safetyNumber = safetyNumber,
             verifiedAt = null,
-            lastRemoteKeyHex = newKeyHex
+            lastRemoteKeyHex = newKeyHex,
+            keyChangePending = false
         )
     }
 }

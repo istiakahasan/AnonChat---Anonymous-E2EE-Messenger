@@ -25,6 +25,12 @@ export interface ContactVerificationRecord {
   safetyNumber: string;
   verifiedAt: number | null;
   lastRemoteKey: string;
+  /**
+   * True from the moment an identity key change is detected until the user either
+   * re-verifies the contact or explicitly accepts the new key. Persisted so the
+   * "sending blocked" lock and warning survive leaving the chat or restarting the app.
+   */
+  keyChangePending?: boolean;
 }
 
 export class SafetyNumberService {
@@ -161,6 +167,7 @@ export class SafetyNumberService {
         safetyNumber: currentSafetyNumber,
         verifiedAt: null, // Reset verification!
         lastRemoteKey: remoteKeyHex,
+        keyChangePending: true,
       };
       await this.saveVerificationState(updatedRecord);
       return { keyChanged: true, safetyNumber: currentSafetyNumber, isVerified: false };
@@ -180,6 +187,7 @@ export class SafetyNumberService {
     const state = await this.getVerificationState(contactId);
     if (state) {
       state.verifiedAt = Date.now();
+      state.keyChangePending = false;
       await this.saveVerificationState(state);
     }
   }
@@ -191,9 +199,30 @@ export class SafetyNumberService {
     const state = await this.getVerificationState(contactId);
     if (state) {
       state.verifiedAt = null; // Step 1: Set verifiedAt = null in local storage
+      state.keyChangePending = true; // Persist the lock so it survives leaving the chat / app restart
       if (newRemoteKeyHex) {
         state.lastRemoteKey = newRemoteKeyHex;
       }
+      await this.saveVerificationState(state);
+    } else {
+      // No prior record: still persist the pending lock so it cannot be bypassed by reopening the chat.
+      await this.saveVerificationState({
+        contactId,
+        safetyNumber: '',
+        verifiedAt: null,
+        lastRemoteKey: newRemoteKeyHex || '',
+        keyChangePending: true,
+      });
+    }
+  }
+
+  /**
+   * Clears the persisted key-change lock (used when the user resolves the warning).
+   */
+  static async clearKeyChangePending(contactId: string): Promise<void> {
+    const state = await this.getVerificationState(contactId);
+    if (state && state.keyChangePending) {
+      state.keyChangePending = false;
       await this.saveVerificationState(state);
     }
   }
@@ -211,6 +240,7 @@ export class SafetyNumberService {
       safetyNumber: newSafetyNumber || (await this.getVerificationState(contactId))?.safetyNumber || '',
       verifiedAt: null, // Remains unverified, but key change alert is cleared
       lastRemoteKey: newRemoteKeyHex,
+      keyChangePending: false,
     };
     await this.saveVerificationState(record);
   }

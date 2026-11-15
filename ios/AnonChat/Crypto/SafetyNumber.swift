@@ -22,6 +22,11 @@ public class SafetyNumber {
         public let safetyNumber: String
         public var verifiedAt: Date?
         public var lastRemoteKeyHex: String
+        /// True from the moment an identity key change is detected until the user either
+        /// re-verifies the contact or explicitly accepts the new key. Must be persisted with the
+        /// record so the "sending blocked" lock survives leaving the chat or restarting the app.
+        /// Optional so records stored before this field existed still decode (nil == false).
+        public var keyChangePending: Bool? = nil
     }
 
     /// Computes the 30-digit individual fingerprint using 5,200 SHA-512 iterations.
@@ -91,6 +96,7 @@ public class SafetyNumber {
     /// Step 1: Set verifiedAt = nil in local storage when identity key change is detected.
     public static func resetVerification(record: inout VerificationRecord, newKeyHex: String? = nil) {
         record.verifiedAt = nil
+        record.keyChangePending = true
         if let newKey = newKeyHex {
             record.lastRemoteKeyHex = newKey
         }
@@ -102,7 +108,8 @@ public class SafetyNumber {
             contactId: contactId,
             safetyNumber: safetyNumber,
             verifiedAt: nil,
-            lastRemoteKeyHex: newKeyHex
+            lastRemoteKeyHex: newKeyHex,
+            keyChangePending: false
         )
     }
 }

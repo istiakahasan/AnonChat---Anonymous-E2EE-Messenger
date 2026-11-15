@@ -27,6 +27,11 @@ pub struct ContactVerificationState {
     pub safety_number: String,
     pub verified_at: Option<u64>,
     pub last_remote_key_hex: String,
+    /// True from the moment an identity key change is detected until the user either
+    /// re-verifies the contact or explicitly accepts the new key. Persisted so the
+    /// "sending blocked" lock survives leaving the chat or restarting the app.
+    #[serde(default)]
+    pub key_change_pending: bool,
 }
 
 impl ContactVerificationState {
@@ -36,6 +41,7 @@ impl ContactVerificationState {
             safety_number: safety_number.to_string(),
             verified_at: None,
             last_remote_key_hex: remote_key_hex.to_string(),
+            key_change_pending: false,
         }
     }
 
@@ -46,6 +52,7 @@ impl ContactVerificationState {
             .unwrap_or_default()
             .as_secs();
         self.verified_at = Some(now);
+        self.key_change_pending = false;
     }
 
     /// Checks if a newly observed remote identity key matches the trusted key.
@@ -55,6 +62,7 @@ impl ContactVerificationState {
             self.last_remote_key_hex = new_remote_key_hex.to_string();
             self.safety_number = new_safety_number.to_string();
             self.verified_at = None; // Reset trust!
+            self.key_change_pending = true; // Block sending until the user resolves it
             return false; // Key changed!
         }
         true // Key matches
@@ -65,6 +73,7 @@ impl ContactVerificationState {
         self.last_remote_key_hex = new_remote_key_hex.to_string();
         self.safety_number = new_safety_number.to_string();
         self.verified_at = None;
+        self.key_change_pending = false;
     }
 }
 
@@ -171,6 +180,15 @@ mod tests {
         assert!(state.verified_at.is_none());
         assert_eq!(state.last_remote_key_hex, "bb");
         assert_eq!(state.safety_number, "33333 44444");
+
+        // The block must persist: a later check with the (now stored) new key must not clear it
+        assert!(state.key_change_pending);
+        assert!(state.check_key_update("bb", "33333 44444"));
+        assert!(state.key_change_pending, "lock is only cleared by verifying or explicitly accepting");
+
+        // Re-verifying clears the lock
+        state.mark_verified();
+        assert!(!state.key_change_pending);
     }
 
     #[test]
@@ -183,5 +201,6 @@ mod tests {
         assert_eq!(state.safety_number, "55555 66666");
         // The accepted key is now the trusted baseline, so no repeated change alert
         assert!(state.check_key_update("cc", "55555 66666"));
+        assert!(!state.key_change_pending, "explicit acceptance clears the lock");
     }
 }

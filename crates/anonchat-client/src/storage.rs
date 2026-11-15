@@ -149,13 +149,27 @@ impl ClientDatabase {
                 contact_id TEXT PRIMARY KEY,
                 safety_number TEXT NOT NULL,
                 verified_at INTEGER,
-                last_remote_key_hex TEXT NOT NULL
+                last_remote_key_hex TEXT NOT NULL,
+                key_change_pending INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_msg_expires ON messages(expires_at);
             "#,
         )?;
+
+        // Migration: databases created before key_change_pending existed.
+        let has_pending_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('contact_verification') WHERE name = 'key_change_pending'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_pending_col == 0 {
+            conn.execute(
+                "ALTER TABLE contact_verification ADD COLUMN key_change_pending INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         Ok(())
     }
@@ -226,18 +240,20 @@ impl ClientDatabase {
         let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
         conn.execute(
             r#"
-            INSERT INTO contact_verification (contact_id, safety_number, verified_at, last_remote_key_hex)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO contact_verification (contact_id, safety_number, verified_at, last_remote_key_hex, key_change_pending)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT (contact_id) DO UPDATE SET
                 safety_number = excluded.safety_number,
                 verified_at = excluded.verified_at,
-                last_remote_key_hex = excluded.last_remote_key_hex;
+                last_remote_key_hex = excluded.last_remote_key_hex,
+                key_change_pending = excluded.key_change_pending;
             "#,
             params![
                 state.contact_id,
                 state.safety_number,
                 state.verified_at,
-                state.last_remote_key_hex
+                state.last_remote_key_hex,
+                state.key_change_pending
             ],
         )?;
         Ok(())
@@ -250,7 +266,7 @@ impl ClientDatabase {
     ) -> Result<Option<anonchat_crypto::ContactVerificationState>, LocalDbError> {
         let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT contact_id, safety_number, verified_at, last_remote_key_hex FROM contact_verification WHERE contact_id = ?1",
+            "SELECT contact_id, safety_number, verified_at, last_remote_key_hex, key_change_pending FROM contact_verification WHERE contact_id = ?1",
         )?;
 
         let mut rows = stmt.query(params![contact_id])?;
@@ -261,6 +277,7 @@ impl ClientDatabase {
                 safety_number: row.get(1)?,
                 verified_at: v_at.map(|v| v as u64),
                 last_remote_key_hex: row.get(3)?,
+                key_change_pending: row.get(4)?,
             }))
         } else {
             Ok(None)
@@ -272,7 +289,7 @@ impl ClientDatabase {
         let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
         let now = Utc::now().timestamp();
         conn.execute(
-            "UPDATE contact_verification SET verified_at = ?1 WHERE contact_id = ?2",
+            "UPDATE contact_verification SET verified_at = ?1, key_change_pending = 0 WHERE contact_id = ?2",
             params![now, contact_id],
         )?;
         Ok(())
@@ -467,7 +484,7 @@ impl ClientDatabase {
     /// Lists all contact verification states stored in the encrypted database.
     pub fn list_all_verification_states(&self) -> Result<Vec<anonchat_crypto::ContactVerificationState>, LocalDbError> {
         let conn = self.conn.lock().map_err(|_| LocalDbError::LockPoisoned)?;
-        let mut stmt = conn.prepare("SELECT contact_id, safety_number, verified_at, last_remote_key_hex FROM contact_verification")?;
+        let mut stmt = conn.prepare("SELECT contact_id, safety_number, verified_at, last_remote_key_hex, key_change_pending FROM contact_verification")?;
         let rows = stmt.query_map([], |row| {
             let v_at: Option<i64> = row.get(2)?;
             Ok(anonchat_crypto::ContactVerificationState {
@@ -475,6 +492,7 @@ impl ClientDatabase {
                 safety_number: row.get(1)?,
                 verified_at: v_at.map(|v| v as u64),
                 last_remote_key_hex: row.get(3)?,
+                key_change_pending: row.get(4)?,
             })
         })?;
         let mut states = Vec::new();
@@ -544,18 +562,20 @@ impl ClientDatabase {
         for state in &data.verification_states {
             tx.execute(
                 r#"
-                INSERT INTO contact_verification (contact_id, safety_number, verified_at, last_remote_key_hex)
-                VALUES (?1, ?2, ?3, ?4)
+                INSERT INTO contact_verification (contact_id, safety_number, verified_at, last_remote_key_hex, key_change_pending)
+                VALUES (?1, ?2, ?3, ?4, ?5)
                 ON CONFLICT (contact_id) DO UPDATE SET
                     safety_number = excluded.safety_number,
                     verified_at = excluded.verified_at,
-                    last_remote_key_hex = excluded.last_remote_key_hex;
+                    last_remote_key_hex = excluded.last_remote_key_hex,
+                    key_change_pending = excluded.key_change_pending;
                 "#,
                 params![
                     state.contact_id,
                     state.safety_number,
                     state.verified_at,
-                    state.last_remote_key_hex
+                    state.last_remote_key_hex,
+                    state.key_change_pending
                 ],
             )?;
         }
