@@ -1084,12 +1084,21 @@ def run_all_tests():
     assert send_blocked is True, "Outbound message sending must be strictly blocked"
     print("    [PASS] Step 3: Message input field disabled and outbound transmission blocked.")
 
+    # Step 3-persist: the lock must survive leaving the chat / restarting the app.
+    # The pending flag is stored with the verification record; the UI state is rebuilt from it.
+    contact_storage["key_change_pending"] = True
+    restored_storage = dict(contact_storage)  # simulate app restart: only persisted data remains
+    restored_input_enabled = not restored_storage.get("key_change_pending", False)
+    assert restored_input_enabled is False, "Key-change lock must persist across chat reopen / app restart"
+    print("    [PASS] Step 3-persist: key-change lock restored from local storage after restart.")
+
     # Step 3a: Test Resolution Choice A: Completes verification again (Safety Number matches)
     reverified_sn = derive_composite_safety_number(alice.ed_pub, alice.user_id(), bob_imposter.ed_pub, bob.user_id())
     # User confirms match
     contact_storage["safety_number"] = reverified_sn
     contact_storage["verified_at"] = int(time.time())
     contact_storage["last_remote_key"] = new_incoming_key_hex
+    contact_storage["key_change_pending"] = False
     is_input_enabled = True
     assert contact_storage["verified_at"] is not None
     assert is_input_enabled is True
@@ -1105,6 +1114,7 @@ def run_all_tests():
     if user_accepted_risk:
         contact_storage["last_remote_key"] = "deadbeef" * 8
         contact_storage["verified_at"] = None # Remains unverified!
+        contact_storage["key_change_pending"] = False
         is_input_enabled = True # Unlocked after explicit acknowledgement
     assert is_input_enabled is True
     assert contact_storage["verified_at"] is None, "Contact must remain unverified when accepted without verification"

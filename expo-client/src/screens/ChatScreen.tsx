@@ -80,6 +80,9 @@ export const ChatScreen: React.FC = () => {
     },
   ]);
 
+  const keyChangeWarningText = (cName: string) =>
+    `⚠️ ${cName}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.`;
+
   // Load verification state from local storage on mount
   useEffect(() => {
     async function checkVerification() {
@@ -87,6 +90,31 @@ export const ChatScreen: React.FC = () => {
         const record = await SafetyNumberService.getVerificationState(contactName);
         if (record && record.verifiedAt) {
           setIsVerified(true);
+        }
+        if (record && record.keyChangePending) {
+          // The key change was never resolved: restore the lock and the persistent warning
+          // so reopening the chat (or restarting the app) cannot silently re-enable sending.
+          const warningText = keyChangeWarningText(contactName);
+          setMessages((prev) =>
+            prev.some((m) => m.isSystemWarning && m.text === warningText)
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: `keychange_restored_${Date.now()}`,
+                    sender: 'System',
+                    text: warningText,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    isMine: false,
+                    isSystemWarning: true,
+                  },
+                ]
+          );
+          setKeyChangeLock({
+            contactName,
+            detectedAt: Date.now(),
+            newKeyHex: record.lastRemoteKey || undefined,
+          });
         }
       } catch (err) {
         console.warn('Could not read verification status:', err);
@@ -109,7 +137,7 @@ export const ChatScreen: React.FC = () => {
     setIsVerified(false);
 
     // 2. Insert persistent non-dismissable system message in chat
-    const warningText = `⚠️ ${cName}'s security code has changed. This could mean they reinstalled the app, or someone is intercepting your messages. Tap to verify again.`;
+    const warningText = keyChangeWarningText(cName);
 
     setMessages((prev) => {
       // Avoid duplicate consecutive system warning messages
@@ -134,7 +162,8 @@ export const ChatScreen: React.FC = () => {
     setKeyChangeLock({
       contactName: cName,
       detectedAt: Date.now(),
-      newKeyHex: newKeyHex || '4A5560EE65C96167969CDA8AF0773669113FDD4D5A4AB721475018FEA959BC81',
+      // Never invent a key: fall back to what is stored (undefined if nothing is known).
+      newKeyHex: newKeyHex || (await SafetyNumberService.getVerificationState(cName))?.lastRemoteKey || undefined,
       previousKeyHex: prevKeyHex,
     });
   };
@@ -225,6 +254,8 @@ export const ChatScreen: React.FC = () => {
                 contactName,
                 keyChangeLock.newKeyHex
               );
+            } else {
+              await SafetyNumberService.clearKeyChangePending(contactName);
             }
             if (approveKeyChange) {
               await approveKeyChange();
